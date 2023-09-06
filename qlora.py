@@ -526,34 +526,21 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
         elif dataset_format == 'airoboros':
             def _format_airoboros(instruction):
                 in_ = None
-                spaces = random.random() < 0.25
                 if "skip_prompt_formatting" in instruction:
                     in_ = instruction["instruction"]
                 else:
-                    if "system" in instruction:
-                        in_ = instruction["system"].strip() + "\n"
-                    else:
-                        in_ = "A chat."
-                        if spaces:
-                            in_ += " "
-                        else:
-                            in_ += "\n"
-                    in_ += "USER: " + instruction["instruction"].strip()
+                    in_ = "\n".join([
+                        (instruction.get('system') or 'A chat.').strip(),
+                        f"USER: {instruction['instruction'].strip()}",
+                    ])
                     if in_.endswith("PLAINFORMAT"):
                         in_ = re.sub(r"[\n\s]+PLAINFORMAT$", "", in_, re.DOTALL)
-                        if not spaces:
-                            in_ += "\nPLAINFORMAT"
-                        else:
-                            in_ += " PLAINFORMAT"
-                    if spaces:
-                        in_ += " "
-                    else:
-                        in_ += "\n"
-                    in_ += "ASSISTANT: "
-                return {
-                    'input': in_,
-                    'output': instruction['response'].strip() + "\n",
-                }
+                        in_ += " PLAINFORMAT"
+                    in_ = "\n".join([in_.strip(), "ASSISTANT: "])
+                 return {
+                     'input': in_,
+                     'output': instruction['response'].strip() + "\n",
+                 }
             dataset = dataset.map(_format_airoboros)
         elif dataset_format == 'input-output':
             # leave as is
