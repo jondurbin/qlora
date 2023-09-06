@@ -444,8 +444,10 @@ def local_dataset(dataset_name):
     else:
         raise ValueError(f"Unsupported dataset format: {dataset_name}")
 
-    split_dataset = full_dataset.train_test_split(test_size=0.01) #, stratify='category')
-    return split_dataset
+    if 'category' in full_dataset.column_names:
+        full_dataset = full_dataset.class_encode_column('category')
+        return full_dataset.train_test_split(test_size=0.02, stratify_by_column='category')
+    return full_dataset.train_test_split(test_size=0.02)
 
 def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
     """
