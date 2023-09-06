@@ -306,15 +306,11 @@ def get_accelerate_model(args, checkpoint_dir):
             model = get_peft_model(model, config)
 
     for name, module in model.named_modules():
-        if isinstance(module, LoraLayer):
-            if args.bf16:
-                module = module.to(torch.bfloat16)
-        if 'norm' in name:
-            module = module.to(torch.bfloat16)
-        if 'lm_head' in name or 'embed_tokens' in name:
-            if hasattr(module, 'weight'):
-                if args.bf16 and module.weight.dtype == torch.float32:
-                    module = module.to(torch.bfloat16)
+        if "norm" in name:
+            module.to(compute_dtype)
+        if "lm_head" in name or "embed_tokens" in name:
+            if hasattr(module, "weight"):
+                module.to(compute_dtype)
     return model
 
 def print_trainable_parameters(args, model):
@@ -448,7 +444,7 @@ def local_dataset(dataset_name):
     else:
         raise ValueError(f"Unsupported dataset format: {dataset_name}")
 
-    split_dataset = full_dataset.train_test_split(test_size=0.001)
+    split_dataset = full_dataset.train_test_split(test_size=0.01) #, stratify='category')
     return split_dataset
 
 def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
