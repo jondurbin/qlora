@@ -157,6 +157,7 @@ class TrainingArguments(transformers.Seq2SeqTrainingArguments):
     save_strategy: str = field(default='steps', metadata={"help": 'When to save checkpoints'})
     save_steps: int = field(default=250, metadata={"help": 'How often to save a model'})
     save_total_limit: int = field(default=40, metadata={"help": 'How many checkpoints to save before the oldest is overwritten'})
+    deepspeed: str = field(default=None, metadata={"help": "deepspeed configuration path"})
 
 @dataclass
 class GenerationArguments:
@@ -263,7 +264,7 @@ def get_accelerate_model(args, checkpoint_dir):
             bnb_4bit_compute_dtype=compute_dtype,
             bnb_4bit_use_double_quant=args.double_quant,
             bnb_4bit_quant_type=args.quant_type,
-        ),
+        ) if args.bits in (4, 8) else None,
         "torch_dtype": (torch.float32 if args.fp16 else (torch.bfloat16 if args.bf16 else torch.float32)),
         "trust_remote_code": args.trust_remote_code,
         "use_auth_token": args.use_auth_token
@@ -539,10 +540,10 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
                         in_ = re.sub(r"[\n\s]+PLAINFORMAT$", "", in_, re.DOTALL)
                         in_ += " PLAINFORMAT"
                     in_ = "\n".join([in_.strip(), "ASSISTANT: "])
-                 return {
-                     'input': in_,
-                     'output': instruction['response'].strip() + "\n",
-                 }
+                return {
+                    'input': in_,
+                    'output': instruction['response'].strip() + "\n",
+                }
             dataset = dataset.map(_format_airoboros)
         elif dataset_format == 'input-output':
             # leave as is
