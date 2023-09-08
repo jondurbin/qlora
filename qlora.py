@@ -63,8 +63,8 @@ class ModelArguments:
 
 @dataclass
 class DataArguments:
-    eval_dataset_size: int = field(
-        default=1024, metadata={"help": "Size of validation dataset."}
+    eval_dataset_size: float = field(
+        default=0.02, metadata={"help": "Ratio of dataset to use for validation."}
     )
     max_train_samples: Optional[int] = field(
         default=None,
@@ -158,6 +158,7 @@ class TrainingArguments(transformers.Seq2SeqTrainingArguments):
     save_steps: int = field(default=250, metadata={"help": 'How often to save a model'})
     save_total_limit: int = field(default=40, metadata={"help": 'How many checkpoints to save before the oldest is overwritten'})
     deepspeed: str = field(default=None, metadata={"help": "deepspeed configuration path"})
+    max_shard_size: str = field(default="5GB", metadata={"help": "Max shard size when saving model after full finetune."})
 
 @dataclass
 class GenerationArguments:
@@ -254,8 +255,8 @@ def get_accelerate_model(args, checkpoint_dir):
         "cache_dir": args.cache_dir,
         "load_in_4bit": args.bits == 4,
         "load_in_8bit": args.bits == 8,
-        "device_map": device_map,
-        "max_memory": max_memory,
+        "device_map": device_map if not args.deepspeed else None,
+        "max_memory": max_memory if not args.deepspeed else None,
         "quantization_config": BitsAndBytesConfig(
             load_in_4bit=args.bits == 4,
             load_in_8bit=args.bits == 8,
@@ -529,15 +530,15 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
         elif dataset_format == 'airoboros':
             def _format_airoboros(instruction):
                 in_ = None
-                if "skip_prompt_formatting" in instruction:
-                    in_ = instruction["instruction"]
+                if instruction.get("skip_prompt_formatting"):
+                    in_ = instruction["instruction"].strip() + "\n"
                 else:
                     in_ = "\n".join([
                         (instruction.get('system') or 'A chat.').strip(),
                         f"USER: {instruction['instruction'].strip()}",
                     ])
                     if in_.endswith("PLAINFORMAT"):
-                        in_ = re.sub(r"[\n\s]+PLAINFORMAT$", "", in_, re.DOTALL)
+                        in_ = re.sub(r"\s+PLAINFORMAT$", "", in_, re.DOTALL)
                         in_ += " PLAINFORMAT"
                     in_ = "\n".join([in_.strip(), "ASSISTANT: "])
                 return {
@@ -562,11 +563,19 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
     if args.do_eval or args.do_predict:
         if 'eval' in dataset:
             eval_dataset = dataset['eval']
+        elif 'test' in dataset:
+            eval_dataset = dataset['test']
         else:
             print('Splitting train dataset in train and validation according to `eval_dataset_size`')
-            dataset = dataset["train"].train_test_split(
-                test_size=args.eval_dataset_size, shuffle=True, seed=42
-            )
+            if 'category' in dataset["train"].column_names:
+                dataset["train"] = dataset["train"].class_encode_column('category')
+                dataset = dataset["train"].train_test_split(
+                    test_size=args.eval_dataset_size, stratify_by_column='category', seed=args.seed
+                )
+            else:
+                dataset = dataset["train"].train_test_split(
+                    test_size=args.eval_dataset_size, shuffle=True, seed=args.seed
+                )
             eval_dataset = dataset['test']
         if args.max_eval_samples is not None and len(eval_dataset) > args.max_eval_samples:
             eval_dataset = eval_dataset.select(range(args.max_eval_samples))
@@ -637,7 +646,8 @@ def train():
     model = get_accelerate_model(args, checkpoint_dir)
 
     model.config.use_cache = False
-    print_trainable_parameters(args, model)
+    if not args.deepspeed:
+        print_trainable_parameters(args, model)
     print('loaded model')
     set_seed(args.seed)
 
@@ -666,15 +676,16 @@ def train():
         trainer.add_callback(SavePeftModelCallback)
 
     # Verifying the datatypes.
-    dtypes = {}
-    for _, p in model.named_parameters():
-        dtype = p.dtype
-        if dtype not in dtypes: dtypes[dtype] = 0
-        dtypes[dtype] += p.numel()
-    total = 0
-    for k, v in dtypes.items(): total+= v
-    for k, v in dtypes.items():
-        print(k, v, v/total)
+    if not args.full_finetune:
+        dtypes = {}
+        for _, p in model.named_parameters():
+            dtype = p.dtype
+            if dtype not in dtypes: dtypes[dtype] = 0
+            dtypes[dtype] += p.numel()
+        total = 0
+        for k, v in dtypes.items(): total+= v
+        for k, v in dtypes.items():
+            print(k, v, v/total)
 
     all_metrics = {"run_name": args.run_name}
     # Training
@@ -718,6 +729,19 @@ def train():
     if (args.do_train or args.do_eval or args.do_predict):
         with open(os.path.join(args.output_dir, "metrics.json"), "w") as fout:
             fout.write(json.dumps(all_metrics))
+
+    # Safely save final full-tune model.
+    if args.full_finetune:
+        state_dict = trainer.model.state_dict()
+        cpu_state_dict = {key: value.cpu() for key, value in state_dict.items()}
+        trainer.model.save_pretrained(args.output_dir, state_dict=cpu_state_dict, max_shard_size=args.max_shard_size)
+        tokenizer.save_pretrained(args.output_dir)
+        with open(os.path.join(args.output_dir, "config.json")) as infile:
+            config = json.loads(infile.read())
+        config["_name_or_path"] = os.path.basename(args.output_dir)
+        with open(os.path.join(args.output_dir, "config.json"), "w") as outfile:
+            outfile.write(json.dumps(config, indent=2))
+
 
 if __name__ == "__main__":
     train()
