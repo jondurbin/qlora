@@ -1,5 +1,5 @@
+transformers @ git+https://github.com/huggingface/transformers@098c3f400cad8de1b689483d7f8386e536fe9397
 bitsandbytes==0.41.1
-transformers==4.33.3
 peft==0.5.0
 accelerate==0.23.0
 einops==0.6.1

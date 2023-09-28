@@ -108,6 +108,10 @@ class DataArguments:
         default=4096,
         metadata={"help": "Maximum model length (input and output).  Sequences will be right padded (and possibly truncated)."},
     )
+    skip_excess_length: bool = field(
+        default=True,
+        metadata={"help": "Purge dataset items that exceed model_max_len"}
+    )
     dataset: str = field(
         default='instructions.jsonl',
         metadata={"help": "Which dataset to finetune on. See datamodule for options."}
@@ -202,7 +206,7 @@ class TrainingArguments(transformers.Seq2SeqTrainingArguments):
     lr_scheduler_type: str = field(default='constant', metadata={"help": 'Learning rate schedule. Constant a bit better than cosine, and has advantage for analysis'})
     warmup_ratio: float = field(default=0.03, metadata={"help": 'Fraction of steps to do a warmup for'})
     logging_steps: int = field(default=10, metadata={"help": 'The frequency of update steps after which to log the loss'})
-    group_by_length: bool = field(default=True, metadata={"help": 'Group sequences into batches with same length. Saves memory and speeds up training considerably.'})
+    group_by_length: bool = field(default=False, metadata={"help": 'Group sequences into batches with same length. Saves memory and speeds up training considerably.'})
     save_strategy: str = field(default='steps', metadata={"help": 'When to save checkpoints'})
     save_steps: int = field(default=250, metadata={"help": 'How often to save a model'})
     save_total_limit: int = field(default=40, metadata={"help": 'How many checkpoints to save before the oldest is overwritten'})
@@ -264,7 +268,16 @@ class SavePeftModelCallback(transformers.TrainerCallback):
             checkpoint_folder = os.path.join(args.working_dir, f"{PREFIX_CHECKPOINT_DIR}-{state.global_step}")
 
         peft_model_path = os.path.join(checkpoint_folder, "adapter_model")
-        kwargs["model"].save_pretrained(peft_model_path)
+
+        if getattr(self.trainer.deepspeed):
+            self.trainer.accelerator.wait_for_everyone()
+            state_dict = self.trainer.accelerator.get_state_dict(self.trainer.deepspeed)
+            unwrapped_model = self.trainer.accelerator.unwrap_model(self.trainer.deepspeed)
+            if self.trainer.accelerator.is_main_process:
+                unwrapped_model.save_pretrained(args.output_dir, state_dict=state_dict)
+            self.trainer.accelerator.wait_for_everyone()
+        else:
+            kwargs["model"].save_pretrained(peft_model_path)
 
         pytorch_model_path = os.path.join(checkpoint_folder, "pytorch_model.bin")
         if os.path.exists(pytorch_model_path):
@@ -324,7 +337,6 @@ def get_accelerate_model(args, checkpoint_dir):
         trust_remote_code=args.trust_remote_code,
         use_auth_token=args.use_auth_token,
         use_flash_attention_2=args.use_flash_attention_2,
-        deepspeed=args.deepspeed,
     )
     if compute_dtype == torch.float16 and args.bits == 4:
         if torch.cuda.is_bf16_supported():
@@ -352,17 +364,15 @@ def get_accelerate_model(args, checkpoint_dir):
         use_auth_token=args.use_auth_token,
     )
     if tokenizer._pad_token is None:
-        smart_tokenizer_and_embedding_resize(
-            special_tokens_dict=dict(pad_token=DEFAULT_PAD_TOKEN),
-            tokenizer=tokenizer,
-            model=model,
-        )
-    if 'llama' in args.model_name_or_path or isinstance(tokenizer, LlamaTokenizer):
+        tokenizer.pad_token = tokenizer.eos_token
+        if tokenizer.pad_token_id is None:
+            tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    if 'llama-2' not in args.model_name_or_path and ('llama' in args.model_name_or_path or isinstance(tokenizer, LlamaTokenizer)):
         # LLaMA tokenizer may not have correct special tokens set.
         # Check and add them if missing to prevent them from being parsed into different tokens.
         # Note that these are present in the vocabulary.
         # Note also that `model.config.pad_token_id` is 0 which corresponds to `<unk>` token.
-        print('Adding special tokens.')
         tokenizer.add_special_tokens({
                 "eos_token": tokenizer.convert_ids_to_tokens(model.config.eos_token_id),
                 "bos_token": tokenizer.convert_ids_to_tokens(model.config.bos_token_id),
@@ -682,7 +692,7 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
             train_dataset = train_dataset.map(lambda x: {'length': len(x['input']) + len(x['output'])})
 
     # Remove any training data that exceeds the max length.
-    if args.purge_excess_length:
+    if args.skip_excess_length:
         def _get_data_length(item):
             prompt = f"{tokenizer.bos_token}{item['input']}{item['output']}{tokenizer.eos_token}"
             return len(
