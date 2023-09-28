@@ -260,6 +260,10 @@ def find_all_linear_names(args, model):
 
 
 class SavePeftModelCallback(transformers.TrainerCallback):
+    def __init__(self, trainer, **_):
+        self.trainer = trainer
+
+
     def save_model(self, args, state, kwargs):
         print('Saving PEFT checkpoint...')
         if state.best_model_checkpoint is not None:
@@ -269,7 +273,7 @@ class SavePeftModelCallback(transformers.TrainerCallback):
 
         peft_model_path = os.path.join(checkpoint_folder, "adapter_model")
 
-        if getattr(self.trainer.deepspeed):
+        if getattr(self.trainer, "deepspeed"):
             self.trainer.accelerator.wait_for_everyone()
             state_dict = self.trainer.accelerator.get_state_dict(self.trainer.deepspeed)
             unwrapped_model = self.trainer.accelerator.unwrap_model(self.trainer.deepspeed)
@@ -291,9 +295,8 @@ class SavePeftModelCallback(transformers.TrainerCallback):
         def touch(fname, times=None):
             with open(fname, 'a'):
                 os.utime(fname, times)
-
-        touch(join(args.working_dir, 'completed'))
         self.save_model(args, state, kwargs)
+        touch(join(args.working_dir, 'completed'))
 
 def get_accelerate_model(args, checkpoint_dir):
 
@@ -401,16 +404,6 @@ def get_accelerate_model(args, checkpoint_dir):
             )
             model = get_peft_model(model, config)
 
-    for name, module in model.named_modules():
-        if isinstance(module, LoraLayer):
-            if args.bf16:
-                module = module.to(torch.bfloat16)
-        if 'norm' in name:
-            module = module.to(torch.float32)
-        if 'lm_head' in name or 'embed_tokens' in name:
-            if hasattr(module, 'weight'):
-                if args.bf16 and module.weight.dtype == torch.float32:
-                    module = module.to(torch.bfloat16)
     return model, tokenizer
 
 def print_trainable_parameters(args, model):
@@ -709,8 +702,7 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
 
     data_collator = DataCollatorForCausalLM(
         tokenizer=tokenizer,
-        source_max_len=args.source_max_len,
-        target_max_len=args.target_max_len,
+        model_max_len=args.model_max_len,
         train_on_source=args.train_on_source,
         predict_with_generate=args.predict_with_generate,
     )
@@ -768,7 +760,7 @@ def train():
 
     # Callbacks
     if not args.full_finetune:
-        trainer.add_callback(SavePeftModelCallback)
+        trainer.add_callback(SavePeftModelCallback(trainer))
     if args.do_mmlu_eval:
         if args.mmlu_dataset == 'mmlu-zs':
             mmlu_dataset = load_dataset("json", data_files={
@@ -797,8 +789,8 @@ def train():
         class MMLUEvalCallback(transformers.TrainerCallback):
             def on_evaluate(self, args, state, control, model, **kwargs):
                 data_loader = trainer.get_eval_dataloader(mmlu_dataset)
-                source_max_len = trainer.data_collator.source_max_len
-                trainer.data_collator.source_max_len = args.mmlu_source_max_len
+                model_max_len = trainer.data_collator.model_max_len
+                trainer.data_collator.model_max_len = args.mmlu_source_max_len
                 trainer.model.eval()
                 preds, refs = [], []
                 loss_mmlu = 0
@@ -829,7 +821,7 @@ def train():
                     subject_scores.append(subject_score)
                 results[f'mmlu_{args.mmlu_split}_accuracy'] = np.mean(subject_scores)
                 trainer.log(results)
-                trainer.data_collator.source_max_len = source_max_len
+                trainer.data_collator.model_max_len = model_max_len
 
         trainer.add_callback(MMLUEvalCallback)
 
@@ -895,12 +887,13 @@ def train():
     state_dict = (
         trainer.accelerator.get_state_dict(trainer.deepspeed)
         if args.deepspeed
-        else trainer.accelerator.get_state_dict()
+        else trainer.model.state_dict()
     )
+    cpu_state_dict = {key: value.cpu() for key, value in state_dict.items()}
     unwrapped_model = (
         trainer.accelerator.unwrap_model(trainer.deepspeed)
         if args.deepspeed
-        else trainer.accelerator.unwrap_model()
+        else trainer.model
     )
     if trainer.accelerator.is_main_process:
         unwrapped_model.save_pretrained(training_args.output_dir, state_dict=state_dict)
