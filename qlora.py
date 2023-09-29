@@ -127,6 +127,10 @@ class DataArguments:
         default='airoboros',
         metadata={"help": "Which dataset format is used. [alpaca|chip2|self-instruct|hh-rlhf|airoboros]"}
     )
+    expand_conversations: bool = field(
+        default=False,
+        metadata={"help": "Expand all multi-turn conversations, use with care"},
+    )
 
 @dataclass
 class TrainingArguments(transformers.Seq2SeqTrainingArguments):
