@@ -682,7 +682,7 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
                     args.dataset_format = args.dataset_format if args.dataset_format else "input-output"
                     full_dataset = (
                         airoboros_chat_dataset(
-                            args.dataset_name,
+                            dataset_name,
                             args.eval_dataset_size,
                             args.expand_conversations
                         )
