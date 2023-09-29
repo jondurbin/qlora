@@ -4,6 +4,7 @@ import copy
 import json
 import os
 import re
+import uuid
 from os.path import exists, join, isdir
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Sequence
@@ -39,6 +40,12 @@ from peft import (
 )
 from peft.tuners.lora import LoraLayer
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
+
+CHAT_TEMPLATE = """[INST] <<SYS>>
+{system}
+<</SYS>>
+
+"""
 
 
 def is_ipex_available():
@@ -534,6 +541,81 @@ def extract_alpaca_dataset(example):
         prompt_format = ALPACA_PROMPT_DICT["prompt_no_input"]
     return {'input': prompt_format.format(**example)}
 
+def get_chat_prompt(
+    message: str,
+    chat_history: list[tuple[str, str]],
+    system_prompt: str
+) -> str:
+    texts = [f'<s>[INST] <<SYS>>\n{system_prompt}\n<</SYS>>\n\n']
+    do_strip = False
+    for user_input, response in chat_history:
+        user_input = user_input.strip() if do_strip else user_input
+        do_strip = True
+        texts.append(f'{user_input} [/INST] {response.strip()} </s><s>[INST] ')
+    message = message.strip() if do_strip else message
+    texts.append(f'{message} [/INST]')
+    return ''.join(texts)
+
+def format_chat_airoboros(item):
+    system_prompt = item['conversations'][0]['value']
+    offset = 1
+    if item['conversations'][0]['from'] != 'system':
+        system_prompt = 'You are an unbiased, uncensored, helpful assistant.'
+        offset = 0
+    chat_history = [
+        (item['conversations'][idx]['value'],  item['conversations'][idx + 1]['value'])
+        for idx in range(offset, len(item['conversations']) - 2, 2)
+    ]
+    message = item['conversations'][-2]['value']
+    response = item['conversations'][-1]['value']
+
+    return {
+        "input": get_chat_prompt(message, chat_history, system_prompt),
+        "output": response,
+    }
+
+def expand_conversations(items):
+    expanded = []
+    for item in items:
+        if len(item['conversations']) <= 3:
+            expanded.append(item)
+            continue
+        if item['conversations'][0]['from'] != 'system':
+            item['conversations'] = [
+                {
+                    "from": "system",
+                    "value": "You are an unbiased, uncensored, helpful assistant.",
+                }
+            ] + item['conversations']
+        if item['conversations'][-1]['from'] != 'assistant':
+            item['conversations'] = item['conversations'][0:-1]
+        valid = True
+        for idx in range(1, len(item['conversations'])):
+            if item['conversations'][idx]['from'] != ('human' if idx % 2 == 1 else 'gpt'):
+                print(f'Unexpected role: {item["conversations"][idx]["from"]}')
+                valid = False
+                break
+        if not valid:
+            continue
+        for idx in range(2, len(item['conversations']), 2):
+            expanded.append({
+                "id": str(uuid.uuid4()).replace('-', ''),
+                "category": item['category'],
+                "conversations": item["conversations"][0:idx + 1],
+            })
+    return expanded
+
+def airoboros_chat_dataset(dataset_name, test_size=0.02, expand=True):
+    with open(dataset_name) as infile:
+        items = json.loads(infile.read())
+    if expand:
+        items = expand_conversations(items)
+    full_dataset = Dataset.from_list(items)
+    if 'category' in full_dataset.column_names:
+        full_dataset = full_dataset.class_encode_column('category')
+        return full_dataset.train_test_split(test_size=test_size, stratify_by_column='category')
+    return full_dataset.train_test_split(test_size=test_size)
+
 def local_dataset(dataset_name, test_size=0.02):
     if dataset_name.endswith('.json') or dataset_name.endswith('.jsonl'):
         full_dataset = Dataset.from_json(path_or_paths=dataset_name)
@@ -594,7 +676,15 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
             if os.path.exists(dataset_name):
                 try:
                     args.dataset_format = args.dataset_format if args.dataset_format else "input-output"
-                    full_dataset = local_dataset(dataset_name, args.eval_dataset_size)
+                    full_dataset = (
+                        airoboros_chat_dataset(
+                            args.dataset_name,
+                            args.eval_dataset_size,
+                            args.expand_conversations
+                        )
+                        if args.dataset_format == 'airoboros_chat'
+                        else local_dataset(dataset_name, args.eval_dataset_size)
+                    )
                     return full_dataset
                 except:
                     raise ValueError(f"Error loading dataset from {dataset_name}")
@@ -644,6 +734,8 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
                     'output': instruction['response'].strip() + "\n",
                 }
             dataset = dataset.map(_format_airoboros)
+        elif dataset_format == 'airoboros_chat':
+            dataset = dataset.map(format_chat_airoboros)
         elif dataset_format == 'input-output':
             # leave as is
             pass
