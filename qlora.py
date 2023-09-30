@@ -289,7 +289,7 @@ class SavePeftModelCallback(transformers.TrainerCallback):
             state_dict = self.trainer.accelerator.get_state_dict(self.trainer.deepspeed)
             unwrapped_model = self.trainer.accelerator.unwrap_model(self.trainer.deepspeed)
             if self.trainer.accelerator.is_main_process:
-                unwrapped_model.save_pretrained(args.output_dir, state_dict=state_dict)
+                unwrapped_model.save_pretrained(args.working_dir, state_dict=state_dict)
             self.trainer.accelerator.wait_for_everyone()
         else:
             kwargs["model"].save_pretrained(peft_model_path)
@@ -550,7 +550,7 @@ def get_chat_prompt(
     chat_history: list[tuple[str, str]],
     system_prompt: str
 ) -> str:
-    texts = [f'<s>[INST] <<SYS>>\n{system_prompt}\n<</SYS>>\n\n']
+    texts = [f'[INST] <<SYS>>\n{system_prompt}\n<</SYS>>\n\n']
     do_strip = False
     for user_input, response in chat_history:
         user_input = user_input.strip() if do_strip else user_input
