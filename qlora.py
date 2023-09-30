@@ -206,6 +206,7 @@ class TrainingArguments(transformers.Seq2SeqTrainingArguments):
     merged_output_dir: str = field(default=None, metadata={"help": "Optional directory to save merged model."})
     optim: str = field(default='paged_adamw_32bit', metadata={"help": 'The optimizer to be used'})
     per_device_train_batch_size: int = field(default=1, metadata={"help": 'The training batch size per GPU. Increase for better speed.'})
+    per_device_eval_batch_size: int = field(default=1, metadata={"help": 'The eval batch size per GPU. Increase for better speed.'})
     gradient_accumulation_steps: int = field(default=16, metadata={"help": 'How many gradients to accumulate before to perform an optimizer step'})
     num_train_epochs: int = field(default=3, metadata={"help": 'Number of training epochs.'})
     weight_decay: float = field(default=0.0, metadata={"help": 'The L2 weight decay rate of AdamW'}) # use lora dropout instead for regularization if needed
@@ -557,7 +558,7 @@ def get_chat_prompt(
         do_strip = True
         texts.append(f'{user_input} [/INST] {response.strip()} </s><s>[INST] ')
     message = message.strip() if do_strip else message
-    texts.append(f'{message} [/INST]')
+    texts.append(f'{message} [/INST] ')
     return ''.join(texts)
 
 def format_chat_airoboros(item):
@@ -591,7 +592,7 @@ def expand_conversations(items):
                     "value": "You are an unbiased, uncensored, helpful assistant.",
                 }
             ] + item['conversations']
-        if item['conversations'][-1]['from'] != 'assistant':
+        if item['conversations'][-1]['from'] != 'gpt':
             item['conversations'] = item['conversations'][0:-1]
         valid = True
         for idx in range(1, len(item['conversations'])):
@@ -601,11 +602,11 @@ def expand_conversations(items):
                 break
         if not valid:
             continue
-        for idx in range(2, len(item['conversations']), 2):
+        for idx in range(1, len(item['conversations']), 2):
             expanded.append({
                 "id": str(uuid.uuid4()).replace('-', ''),
                 "category": item['category'],
-                "conversations": item["conversations"][0:idx + 1],
+                "conversations": item["conversations"][0:idx + 2],
             })
     return expanded
 
