@@ -4,19 +4,23 @@ This is a fork of [QLoRA](https://github.com/artidoro/qlora/blob/main/qlora.py)
 
 ## Differences from original
 
-### airoboros support
-
-Since I am the creator of the various airoboros models, this fork is fairly well catered to the airoboros instruction/response format, and uses the airoboros prompt.
-
-The instructions.jsonl file (or whatever filename you are using), should be a single JSON string per line, newline separated, with "instruction" and "response" values.
-
-Add: `--dataset_format airoboros`
+Since I am the creator of the various airoboros models, this fork is made specifically for airoboros, and does slightly differ from the main upstream repo.
 
 ### airoboros chat support
 
 airoboros datasets starting from 3.0 onwards are using conversational style datasets (e.g. sharegpt)
 
 Add `--dataset_format airoboros_chat`
+
+__*This uses llama-2 chat prompt format!*__
+
+### legacy airoboros support
+
+__*For versions 2.2.1 and earlier*__
+
+The instructions.jsonl file (or whatever filename you are using), should be a single JSON string per line, newline separated, with "instruction" and "response" values.
+
+Add: `--dataset_format airoboros`
 
 ### epochs instead of steps
 
