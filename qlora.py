@@ -399,13 +399,18 @@ def get_accelerate_model(args, checkpoint_dir):
     if not args.full_finetune and args.bits in (8, 4):
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=args.gradient_checkpointing)
 
-        for name, module in model.named_modules():
-            if isinstance(module, LoraLayer):
+    if args.gradient_checkpointing:
+        model.gradient_checkpointing_enable()
+
+    for name, module in model.named_modules():
+        if isinstance(module, LoraLayer):
+            if args.bf16:
                 module = module.to(torch.bfloat16)
-            if "norm" in name:
-                module = module.to(torch.bfloat16)
-            if any(x in name for x in ["lm_head", "embed_tokens", "wte", "wpe"]):
-                if hasattr(module, "weight"):
+        if 'norm' in name:
+            module = module.to(torch.float32)
+        if 'lm_head' in name or 'embed_tokens' in name:
+            if hasattr(module, 'weight'):
+                if args.bf16 and module.weight.dtype == torch.float32:
                     module = module.to(torch.bfloat16)
 
     if not args.full_finetune:
