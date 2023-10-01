@@ -197,7 +197,6 @@ class TrainingArguments(transformers.Seq2SeqTrainingArguments):
     )
     working_dir: str = field(default='./workdir', metadata={"help": 'The output dir for logs and checkpoints'})
     output_dir: str = field(default='./output', metadata={"help": 'The final output directory.'})
-    merged_output_dir: str = field(default=None, metadata={"help": "Optional directory to save merged model."})
     optim: str = field(default='paged_adamw_32bit', metadata={"help": 'The optimizer to be used'})
     per_device_train_batch_size: int = field(default=1, metadata={"help": 'The training batch size per GPU. Increase for better speed.'})
     per_device_eval_batch_size: int = field(default=1, metadata={"help": 'The eval batch size per GPU. Increase for better speed.'})
@@ -993,12 +992,6 @@ def train():
         with open(os.path.join(args.working_dir, "metrics.json"), "w") as fout:
             fout.write(json.dumps(all_metrics))
 
-    # Final save plus optional merge.
-    trainer.accelerator.wait_for_everyone()
-    if trainer.accelerator.is_main_process:
-        trainer.model.save_pretrained(training_args.working_dir)
-    trainer.accelerator.wait_for_everyone()
-
     # Safely save final full-tune model.
     if args.full_finetune:
         state_dict = trainer.model.state_dict()
@@ -1010,25 +1003,19 @@ def train():
         with open(os.path.join(args.output_dir, "config.json"), "w") as outfile:
             outfile.write(json.dumps(config, indent=2))
         tokenizer.save_pretrained(args.output_dir)
-
-    # Optionally merge adapters.
-    if trainer.args.process_index == 0 and args.merged_output_dir and not args.full_finetune:
-        del model
-        del trainer
-        torch.cuda.empty_cache()
-
-        # load PEFT model in fp16
-        model = AutoPeftModelForCausalLM.from_pretrained(
-            training_args.merged_output_dir,
-            low_cpu_mem_usage=True,
-            torch_dtype=torch.float16,
-        )
-
-        # Merge LoRA and base model and save
-        model = model.merge_and_unload()
-        model.save_pretrained(
-            training_args.merged_output_dir, safe_serialization=True, max_shard_size=args.max_shard_size
-        )
+    else:
+        if args.deepspeed:
+            trainer.accelerator.wait_for_everyone()
+            state_dict = trainer.accelerator.get_state_dict(trainer.deepspeed)
+            unwrapped_model = trainer.accelerator.unwrap_model(trainer.deepspeed)
+            if trainer.accelerator.is_main_process:
+                unwrapped_model.save_pretrained(args.output_dir, state_dict=state_dict)
+            trainer.accelerator.wait_for_everyone()
+        else:
+            trainer.accelerator.wait_for_everyone()
+            if trainer.accelerator.is_main_process:
+                trainer.model.save_pretrained(args.output_dir)
+            trainer.accelerator.wait_for_everyone()
 
 
 if __name__ == "__main__":
