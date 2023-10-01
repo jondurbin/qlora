@@ -41,12 +41,6 @@ from peft import (
 from peft.tuners.lora import LoraLayer
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 
-CHAT_TEMPLATE = """[INST] <<SYS>>
-{system}
-<</SYS>>
-
-"""
-
 
 def is_ipex_available():
     def get_major_and_minor_from_version(full_version):
@@ -290,10 +284,10 @@ class SavePeftModelCallback(transformers.TrainerCallback):
             state_dict = self.trainer.accelerator.get_state_dict(self.trainer.deepspeed)
             unwrapped_model = self.trainer.accelerator.unwrap_model(self.trainer.deepspeed)
             if self.trainer.accelerator.is_main_process:
-                unwrapped_model.save_pretrained(args.working_dir, state_dict=state_dict)
+                unwrapped_model.save_pretrained(args.working_dir, state_dict=state_dict, safe_serialization=True)
             self.trainer.accelerator.wait_for_everyone()
         else:
-            kwargs["model"].save_pretrained(peft_model_path)
+            kwargs["model"].save_pretrained(peft_model_path, safe_serialization=True)
 
         pytorch_model_path = os.path.join(checkpoint_folder, "pytorch_model.bin")
         if os.path.exists(pytorch_model_path):
@@ -332,6 +326,17 @@ def get_accelerate_model(args, checkpoint_dir):
 
     print(f'loading base model {args.model_name_or_path}...')
     compute_dtype = (torch.float16 if args.fp16 else (torch.bfloat16 if args.bf16 else torch.float32))
+    bnb_config = None
+    if not args.full_finetune or args.bits in (4, 8):
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=args.bits == 4,
+            load_in_8bit=args.bits == 8,
+            llm_int8_threshold=6.0,
+            llm_int8_has_fp16_weight=False,
+            bnb_4bit_compute_dtype=compute_dtype,
+            bnb_4bit_use_double_quant=args.double_quant,
+            bnb_4bit_quant_type=args.quant_type,
+        )
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path,
         cache_dir=args.cache_dir,
@@ -339,15 +344,7 @@ def get_accelerate_model(args, checkpoint_dir):
         load_in_8bit=args.bits == 8,
         device_map=device_map if not args.deepspeed else None,
         max_memory=max_memory if not args.deepspeed else None,
-        quantization_config=BitsAndBytesConfig(
-            load_in_4bit=args.bits == 4,
-            load_in_8bit=args.bits == 8,
-            llm_int8_threshold=6.0,
-            llm_int8_has_fp16_weight=False,
-            bnb_4bit_compute_dtype=compute_dtype,
-            bnb_4bit_use_double_quant=args.double_quant,
-            bnb_4bit_quant_type=args.quant_type if args.bits == 4 else None,
-        ),
+        quantization_config=bnb_config,
         torch_dtype=(torch.float32 if args.fp16 else (torch.bfloat16 if args.bf16 else torch.float32)),
         trust_remote_code=args.trust_remote_code,
         use_auth_token=args.use_auth_token,
@@ -383,21 +380,30 @@ def get_accelerate_model(args, checkpoint_dir):
         if tokenizer.pad_token_id is None:
             tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    if 'llama-2' not in args.model_name_or_path and ('llama' in args.model_name_or_path or isinstance(tokenizer, LlamaTokenizer)):
+    if 'llama-2' not in args.model_name_or_path and 'codellama' not in args.model_name_or_path and ('llama' in args.model_name_or_path or isinstance(tokenizer, LlamaTokenizer)):
         # LLaMA tokenizer may not have correct special tokens set.
         # Check and add them if missing to prevent them from being parsed into different tokens.
         # Note that these are present in the vocabulary.
         # Note also that `model.config.pad_token_id` is 0 which corresponds to `<unk>` token.
         tokenizer.add_special_tokens({
-                "eos_token": tokenizer.convert_ids_to_tokens(model.config.eos_token_id),
-                "bos_token": tokenizer.convert_ids_to_tokens(model.config.bos_token_id),
-                "unk_token": tokenizer.convert_ids_to_tokens(
-                    model.config.pad_token_id if model.config.pad_token_id != -1 else tokenizer.pad_token_id
-                ),
+            "eos_token": tokenizer.convert_ids_to_tokens(model.config.eos_token_id),
+            "bos_token": tokenizer.convert_ids_to_tokens(model.config.bos_token_id),
+            "unk_token": tokenizer.convert_ids_to_tokens(
+                model.config.pad_token_id if model.config.pad_token_id != -1 else tokenizer.pad_token_id
+            ),
         })
     
     if not args.full_finetune:
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=args.gradient_checkpointing)
+
+        for name, module in model.named_modules():
+            if isinstance(module, LoraLayer):
+                module = module.to(torch.bfloat16)
+            if "norm" in name:
+                module = module.to(torch.bfloat16)
+            if any(x in name for x in ["lm_head", "embed_tokens", "wte", "wpe"]):
+                if hasattr(module, "weight"):
+                    module = module.to(torch.bfloat16)
 
     if not args.full_finetune:
         if checkpoint_dir is not None:
@@ -416,6 +422,7 @@ def get_accelerate_model(args, checkpoint_dir):
             )
             model = get_peft_model(model, config)
 
+    model = model.to('cuda')
     return model, tokenizer
 
 def print_trainable_parameters(args, model):
@@ -967,6 +974,7 @@ def train():
         predictions = tokenizer.batch_decode(
             predictions, skip_special_tokens=True, clean_up_tokenization_spaces=True
         )
+        os.mkdir(args.working_dir, exist_ok=True)
         with open(os.path.join(args.working_dir, 'predictions.jsonl'), 'w') as fout:
             for i, example in enumerate(data_module['predict_dataset']):
                 example['prediction_with_input'] = predictions[i].strip()
@@ -995,7 +1003,7 @@ def train():
         else trainer.model
     )
     if trainer.accelerator.is_main_process:
-        unwrapped_model.save_pretrained(training_args.output_dir, state_dict=state_dict)
+        unwrapped_model.save_pretrained(training_args.working_dir, state_dict=state_dict)
     trainer.accelerator.wait_for_everyone()
 
     # Safely save final full-tune model.
@@ -1012,7 +1020,7 @@ def train():
 
     # Optionally merge adapters.
     if trainer.args.process_index == 0 and args.merged_output_dir and not args.full_finetune:
-        trainer.model.save_pretrained(training_args.merged_output_dir, safe_serialization=False)
+        trainer.model.save_pretrained(training_args.merged_output_dir)
 
         # clear memory
         del model
