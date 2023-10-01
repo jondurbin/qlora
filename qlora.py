@@ -327,7 +327,7 @@ def get_accelerate_model(args, checkpoint_dir):
     print(f'loading base model {args.model_name_or_path}...')
     compute_dtype = (torch.float16 if args.fp16 else (torch.bfloat16 if args.bf16 else torch.float32))
     bnb_config = None
-    if not args.full_finetune or args.bits in (4, 8):
+    if not args.full_finetune and args.bits in (4, 8):
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=args.bits == 4,
             load_in_8bit=args.bits == 8,
@@ -337,6 +337,8 @@ def get_accelerate_model(args, checkpoint_dir):
             bnb_4bit_use_double_quant=args.double_quant,
             bnb_4bit_quant_type=args.quant_type,
         )
+    print(f'BNB Config: {bnb_config}')
+    print(f'Bits: {args.bits}')
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path,
         cache_dir=args.cache_dir,
@@ -350,6 +352,8 @@ def get_accelerate_model(args, checkpoint_dir):
         use_auth_token=args.use_auth_token,
         use_flash_attention_2=args.use_flash_attention_2,
     )
+    print(f'model.is_loaded_in_4bit = {model.is_loaded_in_4bit}')
+    print(f'model.is_loaded_in_8bit = {model.is_loaded_in_8bit}')
     if compute_dtype == torch.float16 and args.bits == 4:
         if torch.cuda.is_bf16_supported():
             print('='*80)
@@ -393,7 +397,7 @@ def get_accelerate_model(args, checkpoint_dir):
             ),
         })
     
-    if not args.full_finetune:
+    if not args.full_finetune and args.bits in (8, 4):
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=args.gradient_checkpointing)
 
         for name, module in model.named_modules():
@@ -420,9 +424,9 @@ def get_accelerate_model(args, checkpoint_dir):
                 bias="none",
                 task_type="CAUSAL_LM",
             )
+            model.enable_input_require_grads()
             model = get_peft_model(model, config)
 
-    model = model.to('cuda')
     return model, tokenizer
 
 def print_trainable_parameters(args, model):
@@ -991,19 +995,8 @@ def train():
 
     # Final save plus optional merge.
     trainer.accelerator.wait_for_everyone()
-    state_dict = (
-        trainer.accelerator.get_state_dict(trainer.deepspeed)
-        if args.deepspeed
-        else trainer.model.state_dict()
-    )
-    cpu_state_dict = {key: value.cpu() for key, value in state_dict.items()}
-    unwrapped_model = (
-        trainer.accelerator.unwrap_model(trainer.deepspeed)
-        if args.deepspeed
-        else trainer.model
-    )
     if trainer.accelerator.is_main_process:
-        unwrapped_model.save_pretrained(training_args.working_dir, state_dict=state_dict)
+        trainer.model.save_pretrained(training_args.working_dir)
     trainer.accelerator.wait_for_everyone()
 
     # Safely save final full-tune model.
@@ -1020,9 +1013,6 @@ def train():
 
     # Optionally merge adapters.
     if trainer.args.process_index == 0 and args.merged_output_dir and not args.full_finetune:
-        trainer.model.save_pretrained(training_args.merged_output_dir)
-
-        # clear memory
         del model
         del trainer
         torch.cuda.empty_cache()
