@@ -965,18 +965,18 @@ def train():
 
     # Safely save final full-tune model.
     if args.full_finetune:
+        trainer.accelerator.wait_for_everyone()
+        state_dict = trainer.model.state_dict()
+        cpu_state_dict = {key: value.cpu() for key, value in state_dict.items()}
         if trainer.accelerator.is_main_process:
-            trainer.accelerator.wait_for_everyone()
-            state_dict = trainer.model.state_dict()
-            cpu_state_dict = {key: value.cpu() for key, value in state_dict.items()}
             trainer.model.save_pretrained(args.output_dir, state_dict=cpu_state_dict, max_shard_size=args.max_shard_size)
-            trainer.accelerator.wait_for_everyone()
             with open(os.path.join(args.output_dir, "config.json")) as infile:
                 config = json.loads(infile.read())
             config["_name_or_path"] = os.path.basename(args.output_dir)
             with open(os.path.join(args.output_dir, "config.json"), "w") as outfile:
                 outfile.write(json.dumps(config, indent=2))
             tokenizer.save_pretrained(args.output_dir)
+        trainer.accelerator.wait_for_everyone()
     else:
         if args.deepspeed:
             trainer.accelerator.wait_for_everyone()
