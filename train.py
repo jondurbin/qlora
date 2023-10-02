@@ -386,7 +386,7 @@ def get_accelerate_model(args, checkpoint_dir):
     if not args.full_finetune and args.bits in (8, 4):
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=args.gradient_checkpointing)
 
-    if args.gradient_checkpointing:
+    if args.gradient_checkpointing and hasattr(model, 'gradient_checkpointing_enable'):
         model.gradient_checkpointing_enable()
 
     for name, module in model.named_modules():
