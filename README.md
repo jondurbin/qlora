@@ -1,6 +1,6 @@
 # Overview
 
-This is a fork of [QLoRA](https://github.com/artidoro/qlora/blob/main/qlora.py)
+This is a fork of [QLoRA](https://github.com/artidoro/qlora)
 
 ## Differences from original
 
@@ -34,7 +34,7 @@ export BASE_DIR=/workspace
 export WANDB_API_KEY=[redacted]
 export WANDB_PROJECT=airoboros-l2-7b-3.0
 
-torchrun --nnodes=1 --nproc_per_node=7 $BASE_DIR/qlora/qlora.py \
+torchrun --nnodes=1 --nproc_per_node=7 $BASE_DIR/qlora/train.py \
   --model_name_or_path $BASE_DIR/llama-2-7b-hf \
   --working_dir $BASE_DIR/$WANDB_PROJECT-checkpoints \
   --output_dir $BASE_DIR/$WANDB_PROJECT \
@@ -101,7 +101,7 @@ export BASE_DIR=/workspace
 export WANDB_API_KEY=[redacted]
 export WANDB_PROJECT=airoboros-l2-70b-3.0
 
-accelerate launch $BASE_DIR/qlora/qlora.py \
+accelerate launch $BASE_DIR/qlora/train.py \
   --model_name_or_path $BASE_DIR/llama-2-70b-hf \
   --working_dir $BASE_DIR/$WANDB_PROJECT-checkpoints \
   --output_dir $BASE_DIR/$WANDB_PROJECT-peft \

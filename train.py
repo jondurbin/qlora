@@ -383,19 +383,6 @@ def get_accelerate_model(args, checkpoint_dir):
         if tokenizer.pad_token_id is None:
             tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    if 'llama-2' not in args.model_name_or_path and 'codellama' not in args.model_name_or_path and ('llama' in args.model_name_or_path or isinstance(tokenizer, LlamaTokenizer)):
-        # LLaMA tokenizer may not have correct special tokens set.
-        # Check and add them if missing to prevent them from being parsed into different tokens.
-        # Note that these are present in the vocabulary.
-        # Note also that `model.config.pad_token_id` is 0 which corresponds to `<unk>` token.
-        tokenizer.add_special_tokens({
-            "eos_token": tokenizer.convert_ids_to_tokens(model.config.eos_token_id),
-            "bos_token": tokenizer.convert_ids_to_tokens(model.config.bos_token_id),
-            "unk_token": tokenizer.convert_ids_to_tokens(
-                model.config.pad_token_id if model.config.pad_token_id != -1 else tokenizer.pad_token_id
-            ),
-        })
-    
     if not args.full_finetune and args.bits in (8, 4):
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=args.gradient_checkpointing)
 
@@ -449,28 +436,6 @@ def print_trainable_parameters(args, model):
         f"all params: {all_param} || "
         f"trainable: {100 * trainable_params / all_param}"
     )
-
-def smart_tokenizer_and_embedding_resize(
-    special_tokens_dict: Dict,
-    tokenizer: transformers.PreTrainedTokenizer,
-    model: transformers.PreTrainedModel,
-):
-    """Resize tokenizer and embedding.
-
-    Note: This is the unoptimized version that may make your embedding size not be divisible by 64.
-    """
-    num_new_tokens = tokenizer.add_special_tokens(special_tokens_dict)
-    model.resize_token_embeddings(len(tokenizer))
-    
-    if num_new_tokens > 0:
-        input_embeddings_data = model.get_input_embeddings().weight.data
-        output_embeddings_data = model.get_output_embeddings().weight.data
-
-        input_embeddings_avg = input_embeddings_data[:-num_new_tokens].mean(dim=0, keepdim=True)
-        output_embeddings_avg = output_embeddings_data[:-num_new_tokens].mean(dim=0, keepdim=True)
-
-        input_embeddings_data[-num_new_tokens:] = input_embeddings_avg
-        output_embeddings_data[-num_new_tokens:] = output_embeddings_avg
 
 @dataclass
 class DataCollatorForCausalLM(object):
@@ -982,7 +947,7 @@ def train():
         predictions = tokenizer.batch_decode(
             predictions, skip_special_tokens=True, clean_up_tokenization_spaces=True
         )
-        os.mkdir(args.working_dir, exist_ok=True)
+        os.makedirs(args.working_dir, exist_ok=True)
         with open(os.path.join(args.working_dir, 'predictions.jsonl'), 'w') as fout:
             for i, example in enumerate(data_module['predict_dataset']):
                 example['prediction_with_input'] = predictions[i].strip()
@@ -994,20 +959,24 @@ def train():
         all_metrics.update(prediction_metrics)
 
     if (args.do_train or args.do_eval or args.do_predict):
+        os.makedirs(args.working_dir, exist_ok=True)
         with open(os.path.join(args.working_dir, "metrics.json"), "w") as fout:
             fout.write(json.dumps(all_metrics))
 
     # Safely save final full-tune model.
     if args.full_finetune:
-        state_dict = trainer.model.state_dict()
-        cpu_state_dict = {key: value.cpu() for key, value in state_dict.items()}
-        trainer.model.save_pretrained(args.output_dir, state_dict=cpu_state_dict, max_shard_size=args.max_shard_size)
-        with open(os.path.join(args.output_dir, "config.json")) as infile:
-            config = json.loads(infile.read())
-        config["_name_or_path"] = os.path.basename(args.output_dir)
-        with open(os.path.join(args.output_dir, "config.json"), "w") as outfile:
-            outfile.write(json.dumps(config, indent=2))
-        tokenizer.save_pretrained(args.output_dir)
+        if trainer.accelerator.is_main_process:
+            trainer.accelerator.wait_for_everyone()
+            state_dict = trainer.model.state_dict()
+            cpu_state_dict = {key: value.cpu() for key, value in state_dict.items()}
+            trainer.model.save_pretrained(args.output_dir, state_dict=cpu_state_dict, max_shard_size=args.max_shard_size)
+            trainer.accelerator.wait_for_everyone()
+            with open(os.path.join(args.output_dir, "config.json")) as infile:
+                config = json.loads(infile.read())
+            config["_name_or_path"] = os.path.basename(args.output_dir)
+            with open(os.path.join(args.output_dir, "config.json"), "w") as outfile:
+                outfile.write(json.dumps(config, indent=2))
+            tokenizer.save_pretrained(args.output_dir)
     else:
         if args.deepspeed:
             trainer.accelerator.wait_for_everyone()
