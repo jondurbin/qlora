@@ -219,7 +219,6 @@ class TrainingArguments(transformers.Seq2SeqTrainingArguments):
     max_shard_size: str = field(default="5GB", metadata={"help": "Max shard size when saving model after full finetune."})
     save_quantized_base: bool = field(default=False, metadata={"help": "Optionally save the quantized base model"})
     use_flash_attention_2: bool = field(default=False, metadata={"help": "Use flash attention 2 (native HF method)"})
-    use_fast_tokenizer: bool = field(default=False, metadata={"help": "Use fast tokenizer"})
 
 @dataclass
 class GenerationArguments:
@@ -374,7 +373,6 @@ def get_accelerate_model(args, checkpoint_dir):
         args.model_name_or_path,
         cache_dir=args.cache_dir,
         padding_side="right",
-        use_fast=args.use_fast_tokenizer,
         tokenizer_type='llama' if 'llama' in args.model_name_or_path else None, # Needed for HF name change
         trust_remote_code=args.trust_remote_code,
         use_auth_token=args.use_auth_token,
