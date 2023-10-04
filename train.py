@@ -385,11 +385,19 @@ def get_accelerate_model(args, checkpoint_dir):
             tokenizer.pad_token_id = tokenizer.unk_token_id
 
     # Add llama-2 chat tokens.
+    extra = ['[INST]', '[/INST]', '<<SYS>>', '<</SYS>>', DEFAULT_PAD_TOKEN]
     tokens = [
         AddedToken(content=s, normalized=False, rstrip=False, lstrip=False)
-        for s in ['[INST]', '[/INST]', '<<SYS>>', '<</SYS>>']
+        for s in extra
     ]
+    special_map = {
+        str(token): token_id
+        for token_id, token in tokenizer.added_tokens_decoder.items()
+        if str(token) in extra
+    }
     tokenizer.add_tokens(tokens)
+    tokenizer.pad_token = DEFAULT_PAD_TOKEN
+    tokenizer.pad_token_id = special_map[DEFAULT_PAD_TOKEN]
 
     if not args.full_finetune and args.bits in (8, 4):
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=args.gradient_checkpointing)
@@ -503,7 +511,7 @@ class DataCollatorForCausalLM(object):
         labels = pad_sequence(labels, batch_first=True, padding_value=IGNORE_INDEX) if not self.predict_with_generate else None
         data_dict = {
             'input_ids': input_ids,
-            'attention_mask':input_ids.ne(self.tokenizer.pad_token_id),
+            'attention_mask': input_ids.ne(self.tokenizer.pad_token_id),
         }
         if labels is not None:
             data_dict['labels'] = labels
