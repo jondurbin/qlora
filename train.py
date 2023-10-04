@@ -21,6 +21,7 @@ import transformers
 from torch.nn.utils.rnn import pad_sequence
 import argparse
 from transformers import (
+    AddedToken,
     AutoTokenizer,
     AutoModelForCausalLM,
     set_seed,
@@ -372,6 +373,7 @@ def get_accelerate_model(args, checkpoint_dir):
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_name_or_path,
         cache_dir=args.cache_dir,
+        use_fast=False,
         padding_side="right",
         tokenizer_type='llama' if 'llama' in args.model_name_or_path else None, # Needed for HF name change
         trust_remote_code=args.trust_remote_code,
@@ -382,11 +384,18 @@ def get_accelerate_model(args, checkpoint_dir):
         if tokenizer.pad_token_id is None:
             tokenizer.pad_token_id = tokenizer.eos_token_id
 
+    # Add llama-2 chat tokens.
+    tokens = [
+        AddedToken(content=s, normalized=False, rstrip=False, lstrip=False)
+        for s in ['[INST]', '[/INST]', '<<SYS>>', '<</SYS>>']
+    ]
+    tokenizer.add_tokens(tokens)
+
     if not args.full_finetune and args.bits in (8, 4):
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=args.gradient_checkpointing)
 
-    if args.gradient_checkpointing and hasattr(model, 'gradient_checkpointing_enable'):
-        model.gradient_checkpointing_enable()
+    #if args.gradient_checkpointing and hasattr(model, 'gradient_checkpointing_enable'):
+    #    model.gradient_checkpointing_enable()
 
     for name, module in model.named_modules():
         if isinstance(module, LoraLayer):
@@ -445,21 +454,32 @@ class DataCollatorForCausalLM(object):
 
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
         # Extract elements
-        sources = [f"{self.tokenizer.bos_token}{example['input']}" for example in instances]
-        targets = [f"{example['output']}{self.tokenizer.eos_token}" for example in instances]
-        # Tokenize
-        tokenized_sources_with_prompt = self.tokenizer(
-            sources,
-            max_length=self.model_max_len,
-            truncation=True,
-            add_special_tokens=False,
-        )
-        tokenized_targets = self.tokenizer(
-            targets,
-            max_length=self.model_max_len,
-            truncation=True,
-            add_special_tokens=False,
-        )
+        tokenized_sources_with_prompt = None
+        tokenized_targets = None
+        if any(['input_tokens' in example for example in instances]):
+            tokenized_sources_with_prompt = [
+                example['input_tokens'] for example in instances
+            ]
+            tokenized_targets = [
+                example['output_tokens'] for example in instances
+            ]
+        else:
+            sources = [f"{self.tokenizer.bos_token}{example['input']}" for example in instances]
+            targets = [f"{example['output']}{self.tokenizer.eos_token}" for example in instances]
+            # Tokenize
+            tokenized_sources_with_prompt = self.tokenizer(
+                sources,
+                max_length=self.model_max_len,
+                truncation=True,
+                add_special_tokens=False,
+            )
+            tokenized_targets = self.tokenizer(
+                targets,
+                max_length=self.model_max_len,
+                truncation=True,
+                add_special_tokens=False,
+            )
+
         # Build the input and labels for causal LM
         input_ids = []
         labels = []
@@ -525,22 +545,19 @@ def extract_alpaca_dataset(example):
         prompt_format = ALPACA_PROMPT_DICT["prompt_no_input"]
     return {'input': prompt_format.format(**example)}
 
-def get_chat_prompt(
-    message: str,
-    chat_history: list[tuple[str, str]],
-    system_prompt: str
-) -> str:
-    texts = [f'[INST] <<SYS>>\n{system_prompt}\n<</SYS>>\n\n']
+def get_chat_input_tokens(message, chat_history, system_prompt, tokenizer, special_map):
+    input_ids = [tokenizer.bos_token_id] + tokenizer(f'[INST] <<SYS>>\n{system_prompt}\n<</SYS>>\n\n', add_special_tokens=False).input_ids
     do_strip = False
     for user_input, response in chat_history:
         user_input = user_input.strip() if do_strip else user_input
         do_strip = True
-        texts.append(f'{user_input} [/INST] {response.strip()} </s><s>[INST] ')
+        input_ids += tokenizer(f'{user_input} [/INST] {response.strip()} ', add_special_tokens=False).input_ids
+        input_ids += [tokenizer.eos_token_id, tokenizer.bos_token_id, special_map['[INST]']]
     message = message.strip() if do_strip else message
-    texts.append(f'{message} [/INST] ')
-    return ''.join(texts)
+    input_ids += tokenizer(f'{message} [/INST]', add_special_tokens=False).input_ids
+    return input_ids
 
-def format_chat_airoboros(item):
+def format_chat_airoboros(item, tokenizer, special_map):
     system_prompt = item['conversations'][0]['value']
     offset = 1
     if item['conversations'][0]['from'] != 'system':
@@ -552,10 +569,9 @@ def format_chat_airoboros(item):
     ]
     message = item['conversations'][-2]['value']
     response = item['conversations'][-1]['value']
-
     return {
-        "input": get_chat_prompt(message, chat_history, system_prompt),
-        "output": response,
+        "input_tokens": get_chat_input_tokens(message, chat_history, system_prompt, tokenizer, special_map),
+        "output_tokens": tokenizer(response, add_special_tokens=False).input_ids + [tokenizer.eos_token_id],
     }
 
 def expand_conversations(items):
@@ -700,7 +716,7 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
                 'output': x['text'],
             })
         elif dataset_format == 'airoboros':
-            def _format_airoboros(instruction):
+            def _format_airoboros(instruction, tokenizer):
                 in_ = None
                 if instruction.get("skip_prompt_formatting"):
                     in_ = instruction["instruction"].strip() + "\n"
@@ -715,17 +731,22 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
                     in_ = "\n".join([in_.strip(), "ASSISTANT: "])
                 return {
                     'input': in_,
-                    'output': instruction['response'].strip() + "\n",
+                    'output': instruction['response'],
                 }
-            dataset = dataset.map(_format_airoboros)
+            dataset = dataset.map(lambda item: _format_airoboros(item, tokenizer))
         elif dataset_format == 'airoboros_chat':
-            dataset = dataset.map(format_chat_airoboros)
+            special_map = {
+                str(token): token_id
+                for token_id, token in tokenizer.added_tokens_decoder.items()
+                if token_id >= 32000
+            }
+            dataset = dataset.map(lambda item: format_chat_airoboros(item, tokenizer, special_map))
         elif dataset_format == 'input-output':
             # leave as is
             pass
         # Remove unused columns.
         dataset = dataset.remove_columns(
-            [col for col in dataset.column_names['train'] if col not in ['input', 'output']]
+            [col for col in dataset.column_names['train'] if col not in ['input', 'output', 'input_tokens', 'output_tokens']]
         )
         return dataset
 
