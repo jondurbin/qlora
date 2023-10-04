@@ -380,9 +380,9 @@ def get_accelerate_model(args, checkpoint_dir):
         use_auth_token=args.use_auth_token,
     )
     if tokenizer._pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token = tokenizer.unk_token
         if tokenizer.pad_token_id is None:
-            tokenizer.pad_token_id = tokenizer.eos_token_id
+            tokenizer.pad_token_id = tokenizer.unk_token_id
 
     # Add llama-2 chat tokens.
     tokens = [
@@ -472,20 +472,20 @@ class DataCollatorForCausalLM(object):
                 max_length=self.model_max_len,
                 truncation=True,
                 add_special_tokens=False,
-            )
+            )['input_ids']
             tokenized_targets = self.tokenizer(
                 targets,
                 max_length=self.model_max_len,
                 truncation=True,
                 add_special_tokens=False,
-            )
+            )['input_ids']
 
         # Build the input and labels for causal LM
         input_ids = []
         labels = []
         for tokenized_source, tokenized_target in zip(
-            tokenized_sources_with_prompt['input_ids'],
-            tokenized_targets['input_ids']
+            tokenized_sources_with_prompt,
+            tokenized_targets,
         ):
             if not self.predict_with_generate:
                 input_ids.append(torch.tensor(tokenized_source + tokenized_target))
@@ -497,6 +497,7 @@ class DataCollatorForCausalLM(object):
                     labels.append(torch.tensor(copy.deepcopy(tokenized_source + tokenized_target)))
             else:
                 input_ids.append(torch.tensor(tokenized_source))
+
         # Apply padding
         input_ids = pad_sequence(input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id)
         labels = pad_sequence(labels, batch_first=True, padding_value=IGNORE_INDEX) if not self.predict_with_generate else None
@@ -786,6 +787,8 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
     # Remove any training data that exceeds the max length.
     if args.skip_excess_length:
         def _get_data_length(item):
+            if 'input_tokens' in item:
+                return len(item['input_tokens']) + len(item['output_tokens'])
             prompt = f"{tokenizer.bos_token}{item['input']}{item['output']}{tokenizer.eos_token}"
             return len(
                 tokenizer(
