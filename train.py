@@ -372,15 +372,13 @@ def get_accelerate_model(args, checkpoint_dir):
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_name_or_path,
         cache_dir=args.cache_dir,
+        use_fast=False,
         padding_side="right",
         tokenizer_type='llama' if 'llama' in args.model_name_or_path else None, # Needed for HF name change
         trust_remote_code=args.trust_remote_code,
         use_auth_token=args.use_auth_token,
     )
-    if tokenizer._pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-        if tokenizer.pad_token_id is None:
-            tokenizer.pad_token_id = tokenizer.eos_token_id
+    tokenizer.pad_token_id = 0
 
     if not args.full_finetune and args.bits in (8, 4):
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=args.gradient_checkpointing)
@@ -445,14 +443,14 @@ class DataCollatorForCausalLM(object):
 
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
         # Extract elements
-        sources = [f"{self.tokenizer.bos_token}{example['input']}" for example in instances]
-        targets = [f"{example['output']}{self.tokenizer.eos_token}" for example in instances]
+        sources = [example['input'] for example in instances]
+        targets = [example['output'] for example in instances]
         # Tokenize
         tokenized_sources_with_prompt = self.tokenizer(
             sources,
             max_length=self.model_max_len,
             truncation=True,
-            add_special_tokens=False,
+            add_special_tokens=True,
         )
         tokenized_targets = self.tokenizer(
             targets,
@@ -468,13 +466,13 @@ class DataCollatorForCausalLM(object):
             tokenized_targets['input_ids']
         ):
             if not self.predict_with_generate:
-                input_ids.append(torch.tensor(tokenized_source + tokenized_target))
+                input_ids.append(torch.tensor(tokenized_source + tokenized_target + [self.tokenizer.eos_token_id]))
                 if not self.train_on_source:
                     labels.append(
-                        torch.tensor([IGNORE_INDEX for _ in range(len(tokenized_source))] + copy.deepcopy(tokenized_target))
+                        torch.tensor([IGNORE_INDEX for _ in range(len(tokenized_source))] + copy.deepcopy(tokenized_target + [self.tokenizer.eos_token_id]))
                     )
                 else:
-                    labels.append(torch.tensor(copy.deepcopy(tokenized_source + tokenized_target)))
+                    labels.append(torch.tensor(copy.deepcopy(tokenized_source + tokenized_target + [self.tokenizer.eos_token_id])))
             else:
                 input_ids.append(torch.tensor(tokenized_source))
         # Apply padding
@@ -482,7 +480,7 @@ class DataCollatorForCausalLM(object):
         labels = pad_sequence(labels, batch_first=True, padding_value=IGNORE_INDEX) if not self.predict_with_generate else None
         data_dict = {
             'input_ids': input_ids,
-            'attention_mask':input_ids.ne(self.tokenizer.pad_token_id),
+            'attention_mask': input_ids.ne(self.tokenizer.pad_token_id),
         }
         if labels is not None:
             data_dict['labels'] = labels
