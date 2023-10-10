@@ -21,6 +21,7 @@ import transformers
 from torch.nn.utils.rnn import pad_sequence
 import argparse
 from transformers import (
+    AddedToken,
     AutoTokenizer,
     AutoModelForCausalLM,
     set_seed,
@@ -378,7 +379,16 @@ def get_accelerate_model(args, checkpoint_dir):
         trust_remote_code=args.trust_remote_code,
         use_auth_token=args.use_auth_token,
     )
-    tokenizer.pad_token_id = 0
+
+    if not tokenizer.pad_token:
+        pad_token = AddedToken(content=DEFAULT_PAD_TOKEN, normalized=False, rstrip=False, lstrip=False, special=True)
+        tokenizer.add_tokens([pad_token])
+        special_map = {
+            str(token): token_id
+            for token_id, token in tokenizer.added_tokens_decoder.items()
+        }
+        tokenizer.pad_token_id = special_map[DEFAULT_PAD_TOKEN]
+        tokenizer.pad_token = DEFAULT_PAD_TOKEN
 
     if not args.full_finetune and args.bits in (8, 4):
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=args.gradient_checkpointing)

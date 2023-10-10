@@ -1,13 +1,13 @@
-transformers @ git+https://github.com/huggingface/transformers@098c3f400cad8de1b689483d7f8386e536fe9397
-bitsandbytes==0.41.1
-peft==0.5.0
-accelerate==0.23.0
-einops==0.6.1
-evaluate==0.4.0
-scikit-learn==1.3.1
-sentencepiece==0.1.99
-flash_attn==2.2.5
+transformers @ git+https://github.com/huggingface/transformers
+bitsandbytes
+peft
+accelerate
+einops
+evaluate
+scikit-learn
+sentencepiece
+flash_attn==2.3.2
 protobuf==3.20.3
-deepspeed==0.10.3
-wandb==0.15.11
+deepspeed
+wandb
 huggingface-hub==0.16.4
