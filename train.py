@@ -349,7 +349,6 @@ def get_accelerate_model(args, checkpoint_dir):
         quantization_config=bnb_config,
         torch_dtype=(torch.float32 if args.fp16 else (torch.bfloat16 if args.bf16 else torch.float32)),
         trust_remote_code=args.trust_remote_code,
-        use_auth_token=args.use_auth_token,
         use_flash_attention_2=args.use_flash_attention_2,
     )
     print(f'model.is_loaded_in_4bit = {model.is_loaded_in_4bit}')
@@ -377,18 +376,10 @@ def get_accelerate_model(args, checkpoint_dir):
         padding_side="right",
         tokenizer_type='llama' if 'llama' in args.model_name_or_path else None, # Needed for HF name change
         trust_remote_code=args.trust_remote_code,
-        use_auth_token=args.use_auth_token,
     )
 
-    if not tokenizer.pad_token:
-        pad_token = AddedToken(content=DEFAULT_PAD_TOKEN, normalized=False, rstrip=False, lstrip=False, special=True)
-        tokenizer.add_tokens([pad_token])
-        special_map = {
-            str(token): token_id
-            for token_id, token in tokenizer.added_tokens_decoder.items()
-        }
-        tokenizer.pad_token_id = special_map[DEFAULT_PAD_TOKEN]
-        tokenizer.pad_token = DEFAULT_PAD_TOKEN
+    tokenizer.pad_token_id = tokenizer.unk_token_id
+    tokenizer.pad_token = tokenizer.unk_token
 
     if not args.full_finetune and args.bits in (8, 4):
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=args.gradient_checkpointing)
@@ -401,7 +392,7 @@ def get_accelerate_model(args, checkpoint_dir):
             if args.bf16:
                 module = module.to(torch.bfloat16)
         if 'norm' in name:
-            module = module.to(torch.float32)
+            module = module.to(torch.bfloat16 if args.bf16 else torch.float32)
         if 'lm_head' in name or 'embed_tokens' in name:
             if hasattr(module, 'weight'):
                 if args.bf16 and module.weight.dtype == torch.float32:
