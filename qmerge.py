@@ -9,7 +9,7 @@ import os
 import bitsandbytes as bnb
 from bitsandbytes.functional import dequantize_4bit
 from peft import PeftModel
-from transformers import AutoModelForCausalLM, LlamaForCausalLM, LlamaTokenizer, BitsAndBytesConfig #CodeLlamaTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig #CodeLlamaTokenizer
 import gc
 import copy
 
@@ -30,7 +30,7 @@ def dequantize_model(model, tokenizer, to, dtype=torch.bfloat16, device="cuda"):
     'device': device to load the model to
     """
     if os.path.exists(to):
-        return LlamaForCausalLM.from_pretrained(to, torch_dtype=torch.bfloat16, device_map="auto")
+        return AutoModelForCausalLM.from_pretrained(to, torch_dtype=torch.bfloat16, device_map="auto")
     os.makedirs(to, exist_ok=True)
     cls = bnb.nn.Linear4bit
     with torch.no_grad():
@@ -69,15 +69,15 @@ def main():
     )
     print(f"Loading base model: {model_path}")
     model = None
-    tokenizer = LlamaTokenizer.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     if os.path.exists(f"{model_path}-dequantized"):
-        model = LlamaForCausalLM.from_pretrained(
+        model = AutoModelForCausalLM.from_pretrained(
             f"{model_path}-dequantized",
             torch_dtype=torch.bfloat16,
             device_map="auto",
         )
     else:
-        model = LlamaForCausalLM.from_pretrained(
+        model = AutoModelForCausalLM.from_pretrained(
             model_path,
             load_in_4bit=True,
             torch_dtype=torch.bfloat16,
@@ -88,7 +88,7 @@ def main():
     model = PeftModel.from_pretrained(model=model, model_id=adapter_path)
     model = model.merge_and_unload()
     print("Successfully loaded and merged model, saving...")
-    model.save_pretrained(args.out)
+    model.save_pretrained(args.out, safe_serialization=True, max_shard_size='4GB')
     tokenizer.save_pretrained(args.out)
     config_data = json.loads(open(os.path.join(args.out, 'config.json'), 'r').read())
     config_data.pop("quantization_config", None)

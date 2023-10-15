@@ -5,6 +5,7 @@ import json
 import os
 import re
 import uuid
+import shutil
 from os.path import exists, join, isdir
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Sequence
@@ -272,11 +273,7 @@ class SavePeftModelCallback(transformers.TrainerCallback):
 
     def save_model(self, args, state, kwargs):
         print('Saving PEFT checkpoint...')
-        if state.best_model_checkpoint is not None:
-            checkpoint_folder = os.path.join(state.best_model_checkpoint, "adapter_model")
-        else:
-            checkpoint_folder = os.path.join(args.working_dir, f"{PREFIX_CHECKPOINT_DIR}-{state.global_step}")
-
+        checkpoint_folder = os.path.join(args.working_dir, f"{PREFIX_CHECKPOINT_DIR}-{state.global_step}")
         peft_model_path = os.path.join(checkpoint_folder, "adapter_model")
 
         if getattr(self.trainer, "deepspeed"):
@@ -284,7 +281,7 @@ class SavePeftModelCallback(transformers.TrainerCallback):
             state_dict = self.trainer.accelerator.get_state_dict(self.trainer.deepspeed)
             unwrapped_model = self.trainer.accelerator.unwrap_model(self.trainer.deepspeed)
             if self.trainer.accelerator.is_main_process:
-                unwrapped_model.save_pretrained(args.working_dir, state_dict=state_dict, safe_serialization=True)
+                unwrapped_model.save_pretrained(peft_model_path, state_dict=state_dict, safe_serialization=True)
             self.trainer.accelerator.wait_for_everyone()
         else:
             kwargs["model"].save_pretrained(peft_model_path, safe_serialization=True)
@@ -292,6 +289,12 @@ class SavePeftModelCallback(transformers.TrainerCallback):
         pytorch_model_path = os.path.join(checkpoint_folder, "pytorch_model.bin")
         if os.path.exists(pytorch_model_path):
             os.remove(pytorch_model_path)
+        try:
+            if os.path.exists(os.path.join(checkpoint_folder, f'global_step{state.global_step}')):
+                print(f'Cleaning up global_step{state.global_step}')
+                shutil.rmtree(os.path.join(checkpoint_folder, f'global_step{state.global_step}'))
+        except Exception as exc:
+            print(f'Failed to clean up global_step{state.global_step}: {exc}')
 
     def on_save(self, args, state, control, **kwargs):
         self.save_model(args, state, kwargs)
