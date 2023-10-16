@@ -539,7 +539,7 @@ def get_chat_prompt(
         do_strip = True
         texts.append(f'{user_input} [/INST] {response.strip()} </s><s>[INST] ')
     message = message.strip() if do_strip else message
-    texts.append(f'{message} [/INST] ')
+    texts.append(f'{message} [/INST]')
     return ''.join(texts)
 
 def format_chat_airoboros(item):
