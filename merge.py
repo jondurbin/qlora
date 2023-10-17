@@ -28,7 +28,7 @@ def main():
     print(f"Running merge_and_unload")
     model = model.merge_and_unload()
     tokenizer = AutoTokenizer.from_pretrained(args.base)
-    model.save_pretrained(args.out)
+    model.save_pretrained(args.out, safe_serialization=True, max_shard_size='4GB')
     tokenizer.save_pretrained(args.out)
     if args.push:
         print(f"Saving to hub ...")
