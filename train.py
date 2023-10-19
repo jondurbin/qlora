@@ -197,8 +197,8 @@ class TrainingArguments(transformers.Seq2SeqTrainingArguments):
         default='none',
         metadata={"help": "To use wandb or something else for reporting."}
     )
-    working_dir: str = field(default='./workdir', metadata={"help": 'The output dir for logs and checkpoints'})
-    output_dir: str = field(default='./output', metadata={"help": 'The final output directory.'})
+    final_output_dir: str = field(default='./final', metadata={"help": 'The final output directory, for completed model'})
+    output_dir: str = field(default='./output', metadata={"help": 'The output (and intermediate) directory.'})
     optim: str = field(default='paged_adamw_32bit', metadata={"help": 'The optimizer to be used'})
     per_device_train_batch_size: int = field(default=1, metadata={"help": 'The training batch size per GPU. Increase for better speed.'})
     per_device_eval_batch_size: int = field(default=1, metadata={"help": 'The eval batch size per GPU. Increase for better speed.'})
@@ -273,7 +273,7 @@ class SavePeftModelCallback(transformers.TrainerCallback):
 
     def save_model(self, args, state, kwargs):
         print('Saving PEFT checkpoint...')
-        checkpoint_folder = os.path.join(args.working_dir, f"{PREFIX_CHECKPOINT_DIR}-{state.global_step}")
+        checkpoint_folder = os.path.join(args.output_dir, f"{PREFIX_CHECKPOINT_DIR}-{state.global_step}")
         peft_model_path = os.path.join(checkpoint_folder, "adapter_model")
 
         if getattr(self.trainer, "deepspeed"):
@@ -305,7 +305,7 @@ class SavePeftModelCallback(transformers.TrainerCallback):
             with open(fname, 'a'):
                 os.utime(fname, times)
         self.save_model(args, state, kwargs)
-        touch(join(args.working_dir, 'completed'))
+        touch(join(args.output_dir, 'completed'))
 
 def get_accelerate_model(args, checkpoint_dir):
 
@@ -469,14 +469,35 @@ class DataCollatorForCausalLM(object):
             tokenized_sources_with_prompt['input_ids'],
             tokenized_targets['input_ids']
         ):
+            truncated_target = False
+            if len(tokenized_source) + len(tokenized_target) > self.model_max_len:
+                if len(tokenized_source) <= 512:
+                    tokenized_target = tokenized_target[0:self.model_max_len - len(tokenized_source)]
+                    truncated_target = True
+                elif len(tokenized_target) <= 512:
+                    tokenized_source = tokenized_source[0:self.model_max_len - len(tokenized_target)]
+                else:
+                    tokenized_source = tokenized_source[0:int(self.model_max_len / 2)]
+                    tokenized_target = tokenized_target[0:int(self.model_max_len / 2)]
+                    truncated_target = True
+
             if not self.predict_with_generate:
-                input_ids.append(torch.tensor(tokenized_source + tokenized_target + [self.tokenizer.eos_token_id]))
+                target_inputs = tokenized_source + tokenized_target
+                if not truncated_target:
+                    target_inputs.append(self.tokenizer.eos_token_id)
+                input_ids.append(torch.tensor(target_inputs))
                 if not self.train_on_source:
+                    target_labels = copy.deepcopy(tokenized_target)
+                    if not truncated_target:
+                        target_labels.append(self.tokenizer.eos_token_id)
                     labels.append(
-                        torch.tensor([IGNORE_INDEX for _ in range(len(tokenized_source))] + copy.deepcopy(tokenized_target + [self.tokenizer.eos_token_id]))
+                        torch.tensor([IGNORE_INDEX for _ in range(len(tokenized_source))] + target_labels)
                     )
                 else:
-                    labels.append(torch.tensor(copy.deepcopy(tokenized_source + tokenized_target + [self.tokenizer.eos_token_id])))
+                    if not truncated_target:
+                        labels.append(torch.tensor(copy.deepcopy(tokenized_source + tokenized_target + [self.tokenizer.eos_token_id])))
+                    else:
+                        labels.append(torch.tensor(copy.deepcopy(tokenized_source + tokenized_target)))
             else:
                 input_ids.append(torch.tensor(tokenized_source))
         # Apply padding
@@ -819,7 +840,7 @@ def train():
     )
     print(args)
     
-    checkpoint_dir, completed_training = get_last_checkpoint(args.working_dir)
+    checkpoint_dir, completed_training = get_last_checkpoint(args.output_dir)
     if completed_training:
         print('Detected that training was already completed!')
 
@@ -948,8 +969,8 @@ def train():
         predictions = tokenizer.batch_decode(
             predictions, skip_special_tokens=True, clean_up_tokenization_spaces=True
         )
-        os.makedirs(args.working_dir, exist_ok=True)
-        with open(os.path.join(args.working_dir, 'predictions.jsonl'), 'w') as fout:
+        os.makedirs(args.output_dir, exist_ok=True)
+        with open(os.path.join(args.output_dir, 'predictions.jsonl'), 'w') as fout:
             for i, example in enumerate(data_module['predict_dataset']):
                 example['prediction_with_input'] = predictions[i].strip()
                 example['prediction'] = predictions[i].replace(example['input'], '').strip()
@@ -960,8 +981,8 @@ def train():
         all_metrics.update(prediction_metrics)
 
     if (args.do_train or args.do_eval or args.do_predict):
-        os.makedirs(args.working_dir, exist_ok=True)
-        with open(os.path.join(args.working_dir, "metrics.json"), "w") as fout:
+        os.makedirs(args.output_dir, exist_ok=True)
+        with open(os.path.join(args.output_dir, "metrics.json"), "w") as fout:
             fout.write(json.dumps(all_metrics))
 
     # Safely save final full-tune model.
@@ -970,13 +991,13 @@ def train():
         state_dict = trainer.model.state_dict()
         cpu_state_dict = {key: value.cpu() for key, value in state_dict.items()}
         if trainer.accelerator.is_main_process:
-            trainer.model.save_pretrained(args.output_dir, state_dict=cpu_state_dict, max_shard_size=args.max_shard_size)
-            with open(os.path.join(args.output_dir, "config.json")) as infile:
+            trainer.model.save_pretrained(args.final_output_dir, state_dict=cpu_state_dict, max_shard_size=args.max_shard_size)
+            with open(os.path.join(args.final_output_dir, "config.json")) as infile:
                 config = json.loads(infile.read())
-            config["_name_or_path"] = os.path.basename(args.output_dir)
-            with open(os.path.join(args.output_dir, "config.json"), "w") as outfile:
+            config["_name_or_path"] = os.path.basename(args.final_output_dir)
+            with open(os.path.join(args.final_output_dir, "config.json"), "w") as outfile:
                 outfile.write(json.dumps(config, indent=2))
-            tokenizer.save_pretrained(args.output_dir)
+            tokenizer.save_pretrained(args.final_output_dir)
         trainer.accelerator.wait_for_everyone()
     else:
         if args.deepspeed:
@@ -984,12 +1005,12 @@ def train():
             state_dict = trainer.accelerator.get_state_dict(trainer.deepspeed)
             unwrapped_model = trainer.accelerator.unwrap_model(trainer.deepspeed)
             if trainer.accelerator.is_main_process:
-                unwrapped_model.save_pretrained(args.output_dir, state_dict=state_dict)
+                unwrapped_model.save_pretrained(args.final_output_dir, safe_serialization=True, state_dict=state_dict)
             trainer.accelerator.wait_for_everyone()
         else:
             trainer.accelerator.wait_for_everyone()
             if trainer.accelerator.is_main_process:
-                trainer.model.save_pretrained(args.output_dir)
+                trainer.model.save_pretrained(args.final_output_dir, safe_serialization=True)
             trainer.accelerator.wait_for_everyone()
 
 
