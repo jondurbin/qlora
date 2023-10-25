@@ -8,7 +8,7 @@ import uuid
 import shutil
 from os.path import exists, join, isdir
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Sequence
+from typing import Optional, Dict, Sequence, Any
 import numpy as np
 from tqdm import tqdm
 import logging
@@ -549,6 +549,7 @@ def extract_alpaca_dataset(example):
     return {'input': prompt_format.format(**example)}
 
 def get_chat_prompt(
+    tokenizer: Any,
     message: str,
     chat_history: list[tuple[str, str]],
     system_prompt: str
@@ -558,12 +559,12 @@ def get_chat_prompt(
     for user_input, response in chat_history:
         user_input = user_input.strip() if do_strip else user_input
         do_strip = True
-        texts.append(f'{user_input} [/INST] {response.strip()} </s><s>[INST] ')
+        texts.append(f'{user_input} [/INST] {response.strip()} {tokenizer.eos_token}{tokenizer.bos_token}[INST] ')
     message = message.strip() if do_strip else message
     texts.append(f'{message} [/INST]')
     return ''.join(texts)
 
-def format_chat_airoboros(item):
+def format_chat_airoboros(tokenizer, item):
     system_prompt = item['conversations'][0]['value']
     offset = 1
     if item['conversations'][0]['from'] != 'system':
@@ -577,7 +578,7 @@ def format_chat_airoboros(item):
     response = item['conversations'][-1]['value']
 
     return {
-        "input": get_chat_prompt(message, chat_history, system_prompt),
+        "input": get_chat_prompt(tokenizer, message, chat_history, system_prompt),
         "output": response,
     }
 
@@ -742,7 +743,7 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
                 }
             dataset = dataset.map(_format_airoboros)
         elif dataset_format == 'airoboros_chat':
-            dataset = dataset.map(format_chat_airoboros)
+            dataset = dataset.map(lambda x: format_chat_airoboros(tokenizer, x))
         elif dataset_format == 'input-output':
             # leave as is
             pass
