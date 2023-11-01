@@ -375,7 +375,7 @@ def get_accelerate_model(args, checkpoint_dir):
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_name_or_path,
         cache_dir=args.cache_dir,
-        use_fast=True, #False,
+        use_fast=False,
         padding_side="right",
         tokenizer_type='llama' if 'llama' in args.model_name_or_path else None, # Needed for HF name change
         trust_remote_code=args.trust_remote_code,
