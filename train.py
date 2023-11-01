@@ -65,8 +65,8 @@ def is_ipex_available():
         )
         return False
     return True
-    
-if torch.cuda.is_available():   
+
+if torch.cuda.is_available():
     torch.backends.cuda.matmul.allow_tf32 = True
 
 logger = logging.getLogger(__name__)
@@ -361,7 +361,7 @@ def get_accelerate_model(args, checkpoint_dir):
             print('='*80)
             print('Your GPU supports bfloat16, you can accelerate training with the argument --bf16')
             print('='*80)
-            
+
     if compute_dtype == torch.float16 and (is_ipex_available() and torch.xpu.is_available()):
         compute_dtype = torch.bfloat16
         print('Intel XPU does not support float16 yet, so switching to bfloat16')
@@ -375,7 +375,7 @@ def get_accelerate_model(args, checkpoint_dir):
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_name_or_path,
         cache_dir=args.cache_dir,
-        use_fast=False,
+        use_fast=True, #False,
         padding_side="right",
         tokenizer_type='llama' if 'llama' in args.model_name_or_path else None, # Needed for HF name change
         trust_remote_code=args.trust_remote_code,
@@ -625,7 +625,9 @@ def airoboros_chat_dataset(dataset_name, test_size=0.02, expand=True):
     return full_dataset.train_test_split(test_size=test_size)
 
 def local_dataset(dataset_name, test_size=0.02):
-    if dataset_name.endswith('.json') or dataset_name.endswith('.jsonl'):
+    if dataset_name.endswith('.parquet'):
+        full_dataset = Dataset.from_parquet(path_or_paths=dataset_name)
+    elif dataset_name.endswith('.json') or dataset_name.endswith('.jsonl'):
         full_dataset = Dataset.from_json(path_or_paths=dataset_name)
     elif dataset_name.endswith('.csv'):
         full_dataset = Dataset.from_pandas(pd.read_csv(dataset_name))
@@ -633,10 +635,12 @@ def local_dataset(dataset_name, test_size=0.02):
         full_dataset = Dataset.from_pandas(pd.read_csv(dataset_name, delimiter='\t'))
     else:
         raise ValueError(f"Unsupported dataset format: {dataset_name}")
-
     if 'category' in full_dataset.column_names:
         full_dataset = full_dataset.class_encode_column('category')
         return full_dataset.train_test_split(test_size=test_size, stratify_by_column='category')
+    elif 'source' in full_dataset.column_names:
+        #full_dataset = full_dataset.class_encode_column('source')
+        return full_dataset.train_test_split(test_size=test_size, stratify_by_column='source')
     return full_dataset.train_test_split(test_size=test_size)
 
 def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
@@ -840,7 +844,7 @@ def train():
         **vars(model_args), **vars(data_args), **vars(training_args)
     )
     print(args)
-    
+
     checkpoint_dir, completed_training = get_last_checkpoint(args.output_dir)
     if completed_training:
         print('Detected that training was already completed!')
@@ -852,7 +856,7 @@ def train():
     set_seed(args.seed)
 
     data_module = make_data_module(tokenizer=tokenizer, args=args)
-    
+
     trainer = Seq2SeqTrainer(
         model=model,
         tokenizer=tokenizer,
