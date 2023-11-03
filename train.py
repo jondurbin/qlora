@@ -551,7 +551,7 @@ def extract_alpaca_dataset(example):
 def get_chat_prompt(
     tokenizer: Any,
     message: str,
-    chat_history: list[tuple[str, str]],
+    chat_history: Any,
     system_prompt: str
 ) -> str:
     texts = [f'[INST] <<SYS>>\n{system_prompt}\n<</SYS>>\n\n']
