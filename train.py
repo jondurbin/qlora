@@ -197,6 +197,7 @@ class TrainingArguments(transformers.Seq2SeqTrainingArguments):
         default='none',
         metadata={"help": "To use wandb or something else for reporting."}
     )
+    use_fast_tokenizer: bool = field(default=False, metadata={"help": "Use fast tokenizer"})
     final_output_dir: str = field(default='./final', metadata={"help": 'The final output directory, for completed model'})
     output_dir: str = field(default='./output', metadata={"help": 'The output (and intermediate) directory.'})
     optim: str = field(default='paged_adamw_32bit', metadata={"help": 'The optimizer to be used'})
@@ -375,7 +376,7 @@ def get_accelerate_model(args, checkpoint_dir):
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_name_or_path,
         cache_dir=args.cache_dir,
-        use_fast=False,
+        use_fast=args.use_fast_tokenizer,
         padding_side="right",
         tokenizer_type='llama' if 'llama' in args.model_name_or_path else None, # Needed for HF name change
         trust_remote_code=args.trust_remote_code,
@@ -383,6 +384,19 @@ def get_accelerate_model(args, checkpoint_dir):
 
     tokenizer.pad_token_id = tokenizer.unk_token_id
     tokenizer.pad_token = tokenizer.unk_token
+
+    # Resize token embeddings, if necessary, to accomodate fast tokenizer with added tokens.
+    num_new_tokens = len(tokenizer) - len(model.get_input_embeddings().weight.data)
+    if num_new_tokens > 0:
+        input_embeddings_data = model.get_input_embeddings().weight.data
+        output_embeddings_data = model.get_output_embeddings().weight.data
+
+        input_embeddings_avg = input_embeddings_data[:-num_new_tokens].mean(dim=0, keepdim=True)
+        output_embeddings_avg = output_embeddings_data[:-num_new_tokens].mean(dim=0, keepdim=True)
+
+        input_embeddings_data[-num_new_tokens:] = input_embeddings_avg
+        output_embeddings_data[-num_new_tokens:] = output_embeddings_avg
+        model.resize_token_embeddings(len(tokenizer))
 
     if not args.full_finetune and args.bits in (8, 4):
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=args.gradient_checkpointing)
