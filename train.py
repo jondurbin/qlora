@@ -355,7 +355,6 @@ def get_accelerate_model(args, checkpoint_dir):
         torch_dtype=(torch.float32 if args.fp16 else (torch.bfloat16 if args.bf16 else torch.float32)),
         trust_remote_code=args.trust_remote_code,
         use_flash_attention_2=args.use_flash_attention_2,
-        neftune_noise_alpha=args.neftune_noise_alpha,
     )
     print(f'model.is_loaded_in_4bit = {model.is_loaded_in_4bit}')
     print(f'model.is_loaded_in_8bit = {model.is_loaded_in_8bit}')
@@ -873,6 +872,7 @@ def train():
 
     data_module = make_data_module(tokenizer=tokenizer, args=args)
 
+    training_args.neftune_noise_alpha = args.neftune_noise_alpha
     trainer = Seq2SeqTrainer(
         model=model,
         tokenizer=tokenizer,
