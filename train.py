@@ -198,6 +198,11 @@ class TrainingArguments(transformers.Seq2SeqTrainingArguments):
         metadata={"help": "To use wandb or something else for reporting."}
     )
     use_fast_tokenizer: bool = field(default=False, metadata={"help": "Use fast tokenizer"})
+    pad_token str = field(default=None, metadata={"help": "Custom pad token, e.g. for qwen"})
+    eos_token str = field(default=None, metadata={"help": "Custom EOS token, e.g. for qwen"})
+    bos_token str = field(default=None, metadata={"help": "Custom BOS token, e.g. for qwen"})
+    unk_token str = field(default=None, metadata={"help": "Custom UNK token, e.g. for qwen"})
+    padding_side: str = field(default="right", metadata={"help": "tokenizer padding side"})
     final_output_dir: str = field(default='./final', metadata={"help": 'The final output directory, for completed model'})
     output_dir: str = field(default='./output', metadata={"help": 'The output (and intermediate) directory.'})
     optim: str = field(default='paged_adamw_32bit', metadata={"help": 'The optimizer to be used'})
@@ -329,6 +334,33 @@ def get_accelerate_model(args, checkpoint_dir):
     if args.full_finetune:
         assert args.bits in [16, 32]
 
+    # Tokenizer...
+    extra_tokens = {}
+    for key in ("pad_token", "eos_token", "bos_token", "unk_token"):
+        value = getattr(args, key, None)
+        if value:
+            extra_tokens[key] = value
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_name_or_path,
+        cache_dir=args.cache_dir,
+        use_fast=args.use_fast_tokenizer,
+        padding_side=args.padding_side,
+        tokenizer_type='llama' if 'llama' in args.model_name_or_path else None, # Needed for HF name change
+        trust_remote_code=args.trust_remote_code,
+        **extra_tokens,
+    )
+    if not tokenizer.pad_token_id:
+        tokenizer.pad_token_id = tokenizer.unk_token_id
+        tokenizer.pad_token = tokenizer.unk_token
+
+    # Ensure the model has the correct token IDs (qwen!!!)
+    tokenizer_kwargs = {}
+    for key in ("pad_token", "eos_token", "bos_token", "unk_token"):
+        value = getattr(args, key, None)
+        if value:
+            tokenizer_kwargs[f"{key}_id"] = getattr(tokenizer, f"{key}_id")
+
+    # Model...
     print(f'loading base model {args.model_name_or_path}...')
     compute_dtype = (torch.float16 if args.fp16 else (torch.bfloat16 if args.bf16 else torch.float32))
     bnb_config = None
@@ -342,8 +374,6 @@ def get_accelerate_model(args, checkpoint_dir):
             bnb_4bit_use_double_quant=args.double_quant,
             bnb_4bit_quant_type=args.quant_type,
         )
-    print(f'BNB Config: {bnb_config}')
-    print(f'Bits: {args.bits}')
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path,
         cache_dir=args.cache_dir,
@@ -355,9 +385,8 @@ def get_accelerate_model(args, checkpoint_dir):
         torch_dtype=(torch.float32 if args.fp16 else (torch.bfloat16 if args.bf16 else torch.float32)),
         trust_remote_code=args.trust_remote_code,
         use_flash_attention_2=args.use_flash_attention_2,
+        **tokenizer_kwargs,
     )
-    print(f'model.is_loaded_in_4bit = {model.is_loaded_in_4bit}')
-    print(f'model.is_loaded_in_8bit = {model.is_loaded_in_8bit}')
     if compute_dtype == torch.float16 and args.bits == 4:
         if torch.cuda.is_bf16_supported():
             print('='*80)
@@ -372,19 +401,6 @@ def get_accelerate_model(args, checkpoint_dir):
     setattr(model, 'is_parallelizable', True)
 
     model.config.torch_dtype=(torch.float32 if args.fp16 else (torch.bfloat16 if args.bf16 else torch.float32))
-
-    # Tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model_name_or_path,
-        cache_dir=args.cache_dir,
-        use_fast=args.use_fast_tokenizer,
-        padding_side="right",
-        tokenizer_type='llama' if 'llama' in args.model_name_or_path else None, # Needed for HF name change
-        trust_remote_code=args.trust_remote_code,
-    )
-
-    tokenizer.pad_token_id = tokenizer.unk_token_id
-    tokenizer.pad_token = tokenizer.unk_token
 
     # Resize token embeddings, if necessary, to accomodate fast tokenizer with added tokens.
     num_new_tokens = len(tokenizer) - len(model.get_input_embeddings().weight.data)
@@ -1009,10 +1025,10 @@ def train():
     # Safely save final full-tune model.
     if args.full_finetune:
         trainer.accelerator.wait_for_everyone()
-        state_dict = trainer.model.state_dict()
-        cpu_state_dict = {key: value.cpu() for key, value in state_dict.items()}
+        state_dict = trainer.accelerator.get_state_dict(trainer.deepspeed)
+        unwrapped_model = trainer.accelerator.unwrap_model(trainer.deepspeed)
         if trainer.accelerator.is_main_process:
-            trainer.model.save_pretrained(args.final_output_dir, state_dict=cpu_state_dict, max_shard_size=args.max_shard_size)
+            unwrapped_model.save_pretrained(args.final_output_dir, state_dict=state_dict, max_shard_size=args.max_shard_size)
             with open(os.path.join(args.final_output_dir, "config.json")) as infile:
                 config = json.loads(infile.read())
             config["_name_or_path"] = os.path.basename(args.final_output_dir)
