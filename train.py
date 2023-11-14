@@ -227,7 +227,7 @@ class TrainingArguments(transformers.Seq2SeqTrainingArguments):
     max_shard_size: str = field(default="5GB", metadata={"help": "Max shard size when saving model after full finetune."})
     save_quantized_base: bool = field(default=False, metadata={"help": "Optionally save the quantized base model"})
     use_flash_attention_2: bool = field(default=False, metadata={"help": "Use flash attention 2 (native HF method)"})
-    neftune_noise_alpha: int = field(default=5, metadata={"help": "NEFTune noise alpha value"})
+    #neftune_noise_alpha: int = field(default=5, metadata={"help": "NEFTune noise alpha value"})
 
 @dataclass
 class GenerationArguments:
@@ -354,11 +354,15 @@ def get_accelerate_model(args, checkpoint_dir):
         tokenizer.pad_token = tokenizer.unk_token
 
     # Ensure the model has the correct token IDs (qwen!!!)
-    tokenizer_kwargs = {}
+    extra_model_args = {}
     for key in ("pad_token", "eos_token", "bos_token", "unk_token"):
         value = getattr(args, key, None)
         if value:
-            tokenizer_kwargs[f"{key}_id"] = getattr(tokenizer, f"{key}_id")
+            extra_model_args[f"{key}_id"] = getattr(tokenizer, f"{key}_id")
+
+    # Flash attention for qwen.
+    if "qwen" in args.model_name_or_path.lower():
+        extra_model_args["use_flash_attn"] = True
 
     # Model...
     print(f'loading base model {args.model_name_or_path}...')
@@ -384,8 +388,8 @@ def get_accelerate_model(args, checkpoint_dir):
         quantization_config=bnb_config,
         torch_dtype=(torch.float32 if args.fp16 else (torch.bfloat16 if args.bf16 else torch.float32)),
         trust_remote_code=args.trust_remote_code,
-        use_flash_attention_2=args.use_flash_attention_2,
-        **tokenizer_kwargs,
+        #use_flash_attention_2=args.use_flash_attention_2,
+        **extra_model_args,
     )
     if compute_dtype == torch.float16 and args.bits == 4:
         if torch.cuda.is_bf16_supported():
@@ -403,23 +407,25 @@ def get_accelerate_model(args, checkpoint_dir):
     model.config.torch_dtype=(torch.float32 if args.fp16 else (torch.bfloat16 if args.bf16 else torch.float32))
 
     # Resize token embeddings, if necessary, to accomodate fast tokenizer with added tokens.
-    num_new_tokens = len(tokenizer) - len(model.get_input_embeddings().weight.data)
-    if num_new_tokens > 0:
-        input_embeddings_data = model.get_input_embeddings().weight.data
-        output_embeddings_data = model.get_output_embeddings().weight.data
+    #num_new_tokens = len(tokenizer) - len(model.get_input_embeddings().weight.data)
+    #if num_new_tokens > 0:
+    #    input_embeddings_data = model.get_input_embeddings().weight.data
+    #    output_embeddings_data = model.get_output_embeddings().weight.data
 
-        input_embeddings_avg = input_embeddings_data[:-num_new_tokens].mean(dim=0, keepdim=True)
-        output_embeddings_avg = output_embeddings_data[:-num_new_tokens].mean(dim=0, keepdim=True)
+    #    input_embeddings_avg = input_embeddings_data[:-num_new_tokens].mean(dim=0, keepdim=True)
+    #    output_embeddings_avg = output_embeddings_data[:-num_new_tokens].mean(dim=0, keepdim=True)
 
-        input_embeddings_data[-num_new_tokens:] = input_embeddings_avg
-        output_embeddings_data[-num_new_tokens:] = output_embeddings_avg
-        model.resize_token_embeddings(len(tokenizer))
+    #    input_embeddings_data[-num_new_tokens:] = input_embeddings_avg
+    #    output_embeddings_data[-num_new_tokens:] = output_embeddings_avg
+    #    model.resize_token_embeddings(len(tokenizer))
 
     if not args.full_finetune and args.bits in (8, 4):
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=args.gradient_checkpointing)
 
     if args.gradient_checkpointing and hasattr(model, 'gradient_checkpointing_enable'):
         model.gradient_checkpointing_enable()
+    if "qwen" in args.model_name_or_path and args.gradient_checkpointing:
+        model.enable_input_require_grads()
 
     for name, module in model.named_modules():
         if isinstance(module, LoraLayer):
@@ -870,7 +876,10 @@ def train():
     ))
     model_args, data_args, training_args, generation_args, extra_args = \
         hfparser.parse_args_into_dataclasses(return_remaining_strings=True)
-    training_args.generation_config = transformers.GenerationConfig(**vars(generation_args))
+    try:
+        training_args.generation_config = transformers.GenerationConfig(**vars(generation_args))
+    except:
+        ...
     args = argparse.Namespace(
         **vars(model_args), **vars(data_args), **vars(training_args)
     )
@@ -888,7 +897,7 @@ def train():
 
     data_module = make_data_module(tokenizer=tokenizer, args=args)
 
-    training_args.neftune_noise_alpha = args.neftune_noise_alpha
+    #training_args.neftune_noise_alpha = args.neftune_noise_alpha
     trainer = Seq2SeqTrainer(
         model=model,
         tokenizer=tokenizer,
