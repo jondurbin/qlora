@@ -127,6 +127,10 @@ class DataArguments:
         default=False,
         metadata={"help": "Expand all multi-turn conversations, use with care"},
     )
+    include_sources: Optional[str] = field(
+        default=None,
+        metadata={"help": "Comma separated list of sources to include (source field in dataset)"}
+    )
 
 @dataclass
 class TrainingArguments(transformers.Seq2SeqTrainingArguments):
@@ -501,7 +505,7 @@ class DataCollatorForCausalLM(object):
             tokenized_targets['input_ids']
         ):
             truncated_target = False
-            if len(tokenized_source) + len(tokenized_target) > self.model_max_len:
+            if len(tokenized_source) + len(tokenized_target) >= self.model_max_len:
                 if len(tokenized_source) <= 512:
                     tokenized_target = tokenized_target[0:self.model_max_len - len(tokenized_source)]
                     truncated_target = True
@@ -644,9 +648,16 @@ def expand_conversations(items):
             })
     return expanded
 
-def airoboros_chat_dataset(dataset_name, test_size=0.02, expand=True):
-    with open(dataset_name) as infile:
-        items = json.loads(infile.read())
+def airoboros_chat_dataset(dataset_name, test_size=0.02, expand=True, include_sources=None):
+    items = []
+    if dataset_name.endswith(".json"):
+        with open(dataset_name) as infile:
+            items = json.loads(infile.read())
+    else:
+        items = [item for item in Dataset.from_parquet(dataset_name)]
+    if include_sources and include_sources != ['ALL']:
+        print(f'Filtering for sources: {include_sources}')
+        items = [item for item in items if item.get('source') in include_sources]
     if expand:
         items = expand_conversations(items)
     full_dataset = Dataset.from_list(items)
@@ -655,7 +666,7 @@ def airoboros_chat_dataset(dataset_name, test_size=0.02, expand=True):
         return full_dataset.train_test_split(test_size=test_size, stratify_by_column='category')
     return full_dataset.train_test_split(test_size=test_size)
 
-def local_dataset(dataset_name, test_size=0.02):
+def local_dataset(dataset_name, test_size=0.02, include_sources=None):
     if dataset_name.endswith('.parquet'):
         full_dataset = Dataset.from_parquet(path_or_paths=dataset_name)
     elif dataset_name.endswith('.json') or dataset_name.endswith('.jsonl'):
@@ -666,11 +677,17 @@ def local_dataset(dataset_name, test_size=0.02):
         full_dataset = Dataset.from_pandas(pd.read_csv(dataset_name, delimiter='\t'))
     else:
         raise ValueError(f"Unsupported dataset format: {dataset_name}")
+    if include_sources and include_sources != ['ALL']:
+        print(f'Filtering for sources: {include_sources}')
+        full_dataset = full_datasets.filter(lambda x: x['source'] in include_sources)
     if 'category' in full_dataset.column_names:
         full_dataset = full_dataset.class_encode_column('category')
         return full_dataset.train_test_split(test_size=test_size, stratify_by_column='category')
     elif 'source' in full_dataset.column_names:
-        #full_dataset = full_dataset.class_encode_column('source')
+        try:
+            full_dataset = full_dataset.class_encode_column('source')
+        except:
+            ...
         return full_dataset.train_test_split(test_size=test_size, stratify_by_column='source')
     return full_dataset.train_test_split(test_size=test_size)
 
@@ -723,10 +740,11 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
                         airoboros_chat_dataset(
                             dataset_name,
                             args.eval_dataset_size,
-                            args.expand_conversations
+                            args.expand_conversations,
+                            args.include_sources.split(','),
                         )
                         if args.dataset_format == 'airoboros_chat'
-                        else local_dataset(dataset_name, args.eval_dataset_size)
+                        else local_dataset(dataset_name, args.eval_dataset_size, include_sources=args.include_sources.split(','))
                     )
                     return full_dataset
                 except:
