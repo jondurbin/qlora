@@ -128,7 +128,7 @@ class DataArguments:
         metadata={"help": "Expand all multi-turn conversations, use with care"},
     )
     include_sources: Optional[str] = field(
-        default=None,
+        default="ALL",
         metadata={"help": "Comma separated list of sources to include (source field in dataset)"}
     )
 
@@ -363,6 +363,12 @@ def get_accelerate_model(args, checkpoint_dir):
         value = getattr(args, key, None)
         if value:
             tokenizer_kwargs[f"{key}_id"] = getattr(tokenizer, f"{key}_id")
+
+    # Add our special digit tokens.
+    tokenizer.add_tokens([
+        AddedToken(f'<<[int]>>{num}<<[/int]>>', special=True, lstrip=True, rstrip=True, normalized=False)
+        for num in range(10)
+    ])
 
     # Model...
     print(f'loading base model {args.model_name_or_path}...')
@@ -792,7 +798,7 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
                     in_ = "\n".join([in_.strip(), "ASSISTANT: "])
                 return {
                     'input': in_,
-                    'output': instruction['response'].strip() + "\n",
+                    'output': re.sub('(\d)', r'<<[int]>>\1<<[/int]>>', instruction['response']).strip(),
                 }
             dataset = dataset.map(_format_airoboros)
         elif dataset_format == 'airoboros_chat':
