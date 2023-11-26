@@ -128,7 +128,7 @@ class DataArguments:
         metadata={"help": "Expand all multi-turn conversations, use with care"},
     )
     include_sources: Optional[str] = field(
-        default=None,
+        default="ALL",
         metadata={"help": "Comma separated list of sources to include (source field in dataset)"}
     )
 
