@@ -38,7 +38,7 @@ def dequantize_model(model, tokenizer, to, dtype=torch.bfloat16, device="cuda"):
             if isinstance(module, cls):
                 print(f"Dequantizing `{name}`...")
                 quant_state = copy.deepcopy(module.weight.quant_state)
-                quant_state[2] = dtype
+                quant_state.dtype = dtype
                 weights = dequantize_4bit(module.weight.data, quant_state=quant_state, quant_type="nf4").to(dtype)
                 new_module = torch.nn.Linear(module.in_features, module.out_features, bias=None, dtype=dtype)
                 new_module.weight = torch.nn.Parameter(weights)
