@@ -364,6 +364,7 @@ def get_accelerate_model(args, checkpoint_dir):
         if value:
             extra_model_args[f"{key}_id"] = getattr(tokenizer, f"{key}_id")
     if "qwen" in args.model_name_or_path:
+        extra_model_args["bf16"] = True
         extra_model_args["use_flash_attn"] = True
 
     # Model...
@@ -391,7 +392,6 @@ def get_accelerate_model(args, checkpoint_dir):
         torch_dtype=(torch.float32 if args.fp16 else (torch.bfloat16 if args.bf16 else torch.float32)),
         trust_remote_code=args.trust_remote_code,
         use_flash_attention_2=args.use_flash_attention_2,
-        bf16=True,
         **extra_model_args,
     )
     if compute_dtype == torch.float16 and args.bits == 4:
