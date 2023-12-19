@@ -358,11 +358,13 @@ def get_accelerate_model(args, checkpoint_dir):
         tokenizer.pad_token = tokenizer.unk_token
 
     # Ensure the model has the correct token IDs (qwen!!!)
-    tokenizer_kwargs = {}
+    extra_model_args = {}
     for key in ("pad_token", "eos_token", "bos_token", "unk_token"):
         value = getattr(args, key, None)
         if value:
-            tokenizer_kwargs[f"{key}_id"] = getattr(tokenizer, f"{key}_id")
+            extra_model_args[f"{key}_id"] = getattr(tokenizer, f"{key}_id")
+    if "qwen" in args.model_name_or_path:
+        extra_model_args["use_flash_attn"] = True
 
     # Model...
     print(f'loading base model {args.model_name_or_path}...')
@@ -389,7 +391,8 @@ def get_accelerate_model(args, checkpoint_dir):
         torch_dtype=(torch.float32 if args.fp16 else (torch.bfloat16 if args.bf16 else torch.float32)),
         trust_remote_code=args.trust_remote_code,
         use_flash_attention_2=args.use_flash_attention_2,
-        **tokenizer_kwargs,
+        bf16=True,
+        **extra_model_args,
     )
     if compute_dtype == torch.float16 and args.bits == 4:
         if torch.cuda.is_bf16_supported():
@@ -407,17 +410,18 @@ def get_accelerate_model(args, checkpoint_dir):
     model.config.torch_dtype=(torch.float32 if args.fp16 else (torch.bfloat16 if args.bf16 else torch.float32))
 
     # Resize token embeddings, if necessary, to accomodate fast tokenizer with added tokens.
-    num_new_tokens = len(tokenizer) - len(model.get_input_embeddings().weight.data)
-    if num_new_tokens > 0:
-        input_embeddings_data = model.get_input_embeddings().weight.data
-        output_embeddings_data = model.get_output_embeddings().weight.data
+    if "qwen" not in args.model_name_or_path:
+        num_new_tokens = len(tokenizer) - len(model.get_input_embeddings().weight.data)
+        if num_new_tokens > 0:
+            input_embeddings_data = model.get_input_embeddings().weight.data
+            output_embeddings_data = model.get_output_embeddings().weight.data
 
-        input_embeddings_avg = input_embeddings_data[:-num_new_tokens].mean(dim=0, keepdim=True)
-        output_embeddings_avg = output_embeddings_data[:-num_new_tokens].mean(dim=0, keepdim=True)
+            input_embeddings_avg = input_embeddings_data[:-num_new_tokens].mean(dim=0, keepdim=True)
+            output_embeddings_avg = output_embeddings_data[:-num_new_tokens].mean(dim=0, keepdim=True)
 
-        input_embeddings_data[-num_new_tokens:] = input_embeddings_avg
-        output_embeddings_data[-num_new_tokens:] = output_embeddings_avg
-        model.resize_token_embeddings(len(tokenizer))
+            input_embeddings_data[-num_new_tokens:] = input_embeddings_avg
+            output_embeddings_data[-num_new_tokens:] = output_embeddings_avg
+            model.resize_token_embeddings(len(tokenizer))
 
     if not args.full_finetune and args.bits in (8, 4):
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=args.gradient_checkpointing)
