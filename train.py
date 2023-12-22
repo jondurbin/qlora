@@ -42,7 +42,7 @@ from peft import (
 )
 from peft.tuners.lora import LoraLayer
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
-from accelerate import Accelerator
+
 
 def is_ipex_available():
     def get_major_and_minor_from_version(full_version):
@@ -230,7 +230,7 @@ class TrainingArguments(transformers.Seq2SeqTrainingArguments):
     deepspeed: str = field(default=None, metadata={"help": "deepspeed configuration path"})
     max_shard_size: str = field(default="5GB", metadata={"help": "Max shard size when saving model after full finetune."})
     save_quantized_base: bool = field(default=False, metadata={"help": "Optionally save the quantized base model"})
-    attn_implementation: str = field(default=None, metadata={"help": "Attention implementation."})
+    use_flash_attention_2: bool = field(default=False, metadata={"help": "Use flash attention 2 (native HF method)"})
     neftune_noise_alpha: int = field(default=5, metadata={"help": "NEFTune noise alpha value"})
 
 @dataclass
@@ -325,6 +325,16 @@ def get_accelerate_model(args, checkpoint_dir):
     if is_ipex_available() and torch.xpu.is_available():
         n_gpus = torch.xpu.device_count()
 
+    max_memory = f'{args.max_memory_MB}MB'
+    max_memory = {i: max_memory for i in range(n_gpus)}
+    device_map = "auto"
+
+    # if we are in a distributed setting, we need to set the device map and max memory per device
+    if os.environ.get('LOCAL_RANK') is not None:
+        local_rank = int(os.environ.get('LOCAL_RANK', '0'))
+        device_map = {'': local_rank}
+        max_memory = {'': max_memory[local_rank]}
+
     if args.full_finetune:
         assert args.bits in [16, 32]
 
@@ -376,10 +386,12 @@ def get_accelerate_model(args, checkpoint_dir):
         cache_dir=args.cache_dir,
         load_in_4bit=args.bits == 4,
         load_in_8bit=args.bits == 8,
+        device_map=device_map if not args.deepspeed else None,
+        max_memory=max_memory if not args.deepspeed else None,
         quantization_config=bnb_config,
         torch_dtype=(torch.float32 if args.fp16 else (torch.bfloat16 if args.bf16 else torch.float32)),
         trust_remote_code=args.trust_remote_code,
-        attn_implementation=args.attn_implementation,
+        use_flash_attention_2=args.use_flash_attention_2,
         **extra_model_args,
     )
     if compute_dtype == torch.float16 and args.bits == 4:
@@ -417,6 +429,17 @@ def get_accelerate_model(args, checkpoint_dir):
     if args.gradient_checkpointing and hasattr(model, 'gradient_checkpointing_enable'):
         model.gradient_checkpointing_enable()
 
+    for name, module in model.named_modules():
+        if isinstance(module, LoraLayer):
+            if args.bf16:
+                module = module.to(torch.bfloat16)
+        if 'norm' in name:
+            module = module.to(torch.bfloat16 if args.bf16 else torch.float32)
+        if 'lm_head' in name or 'embed_tokens' in name:
+            if hasattr(module, 'weight'):
+                if args.bf16 and module.weight.dtype == torch.float32:
+                    module = module.to(torch.bfloat16)
+
     if not args.full_finetune:
         if checkpoint_dir is not None:
             print("Loading adapters from checkpoint.")
@@ -434,8 +457,7 @@ def get_accelerate_model(args, checkpoint_dir):
             )
             model.enable_input_require_grads()
             model = get_peft_model(model, config)
-    accelerator = Accelerator()
-    model = accelerator.prepare_model(model)
+
     return model, tokenizer
 
 def print_trainable_parameters(args, model):
