@@ -29,6 +29,7 @@ from transformers import (
     Seq2SeqTrainer,
     BitsAndBytesConfig,
     LlamaTokenizer,
+    Trainer,
 )
 from datasets import load_dataset, Dataset
 import evaluate
@@ -43,6 +44,30 @@ from peft import (
 from peft.tuners.lora import LoraLayer
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 from accelerate import Accelerator
+from mamba_ssm.models.mixer_seq_simple import MambaLMHeadModel
+
+
+class MambaTrainer(Trainer):
+    def compute_loss(self, model, inputs, return_outputs=False):
+        input_ids = inputs.pop("input_ids")
+        lm_logits = model(input_ids).logits
+
+        labels = input_ids.to(lm_logits.device)
+        shift_logits = lm_logits[:, :-1, :].contiguous()
+        labels = labels[:, 1:].contiguous()
+
+        loss_fct = torch.nn.CrossEntropyLoss()
+        lm_loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), labels.view(-1))
+
+        return lm_loss
+
+    def save_model(self, output_dir, _internal_call):
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        torch.save(self.model.state_dict(), f"{output_dir}/pytorch_model.bin")
+        self.tokenizer.save_pretrained(output_dir)
+
 
 def is_ipex_available():
     def get_major_and_minor_from_version(full_version):
@@ -232,7 +257,6 @@ class TrainingArguments(transformers.Seq2SeqTrainingArguments):
     max_shard_size: str = field(default="5GB", metadata={"help": "Max shard size when saving model after full finetune."})
     save_quantized_base: bool = field(default=False, metadata={"help": "Optionally save the quantized base model"})
     attn_implementation: str = field(default=None, metadata={"help": "Attention implementation."})
-    neftune_noise_alpha: int = field(default=5, metadata={"help": "NEFTune noise alpha value"})
 
 @dataclass
 class GenerationArguments:
@@ -337,9 +361,8 @@ def get_accelerate_model(args, checkpoint_dir):
             extra_tokens[key] = value
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_name_or_path,
-        cache_dir=args.cache_dir,
         use_fast=args.use_fast_tokenizer,
-        padding_side=args.padding_side,
+        #padding_side=args.padding_side,
         tokenizer_type='llama' if 'llama' in args.model_name_or_path else None, # Needed for HF name change
         trust_remote_code=args.trust_remote_code,
         **extra_tokens,
@@ -349,14 +372,15 @@ def get_accelerate_model(args, checkpoint_dir):
         tokenizer.pad_token = tokenizer.unk_token
 
     # Ensure the model has the correct token IDs (qwen!!!)
-    extra_model_args = {}
-    for key in ("pad_token", "eos_token", "bos_token", "unk_token"):
-        value = getattr(args, key, None)
-        if value:
-            extra_model_args[f"{key}_id"] = getattr(tokenizer, f"{key}_id")
+    model_args = {}
+    if "mamba" not in args.model_name_or_path:
+        for key in ("pad_token", "eos_token", "bos_token", "unk_token"):
+            value = getattr(args, key, None)
+            if value:
+                model_args[f"{key}_id"] = getattr(tokenizer, f"{key}_id")
     if "qwen" in args.model_name_or_path:
-        extra_model_args["bf16"] = True
-        extra_model_args["use_flash_attn"] = True
+        model_args["bf16"] = True
+        model_args["use_flash_attn"] = True
 
     # Model...
     print(f'loading base model {args.model_name_or_path}...')
@@ -372,17 +396,25 @@ def get_accelerate_model(args, checkpoint_dir):
             bnb_4bit_use_double_quant=args.double_quant,
             bnb_4bit_quant_type=args.quant_type,
         )
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model_name_or_path,
-        cache_dir=args.cache_dir,
-        load_in_4bit=args.bits == 4,
-        load_in_8bit=args.bits == 8,
-        quantization_config=bnb_config,
-        torch_dtype=(torch.float32 if args.fp16 else (torch.bfloat16 if args.bf16 else torch.float32)),
-        trust_remote_code=args.trust_remote_code,
-        attn_implementation=args.attn_implementation,
-        **extra_model_args,
-    )
+    model_class = MambaLMHeadModel if "mamba" in args.model_name_or_path else AutoModelForCausalLM
+    model_args.update({
+        "torch_dtype": (torch.float32 if args.fp16 else (torch.bfloat16 if args.bf16 else torch.float32)),
+    })
+    if "mamba" not in args.model_name_or_path:
+        model_args.update({
+            "trust_remote_code": args.trust_remote_code,
+            "load_in_4bit": args.bits == 4,
+            "load_in_8bit": args.bits == 8,
+            "quantization_config": bnb_config,
+            "trust_remote_code": args.trust_remote_code,
+            "attn_implementation": args.attn_implementation,
+        })
+    else:
+        model_args["dtype"] = model_args.pop("torch_dtype")
+    model = model_class.from_pretrained(args.model_name_or_path, **model_args)
+    if "mamba" in args.model_name_or_path:
+        model.config.to_dict = lambda *_: model.config.__dict__
+
     if compute_dtype == torch.float16 and args.bits == 4:
         if torch.cuda.is_bf16_supported():
             print('='*80)
@@ -399,7 +431,7 @@ def get_accelerate_model(args, checkpoint_dir):
     model.config.torch_dtype=(torch.float32 if args.fp16 else (torch.bfloat16 if args.bf16 else torch.float32))
 
     # Resize token embeddings, if necessary, to accomodate fast tokenizer with added tokens.
-    if "qwen" not in args.model_name_or_path:
+    if "qwen" not in args.model_name_or_path and "mamba" not in args.model_name_or_path:
         num_new_tokens = len(tokenizer) - len(model.get_input_embeddings().weight.data)
         if num_new_tokens > 0:
             input_embeddings_data = model.get_input_embeddings().weight.data
@@ -417,6 +449,19 @@ def get_accelerate_model(args, checkpoint_dir):
 
     if args.gradient_checkpointing and hasattr(model, 'gradient_checkpointing_enable'):
         model.gradient_checkpointing_enable()
+
+    #if "mamba" not in args.model_name_or_path:
+    if True:
+        for name, module in model.named_modules():
+            if isinstance(module, LoraLayer):
+                if args.bf16:
+                    module = module.to(torch.bfloat16)
+            if 'norm' in name:
+                module = module.to(torch.bfloat16 if args.bf16 else torch.float32)
+            if 'lm_head' in name or 'embed_tokens' in name:
+                if hasattr(module, 'weight'):
+                    if args.bf16 and module.weight.dtype == torch.float32:
+                        module = module.to(torch.bfloat16)
 
     if not args.full_finetune:
         if checkpoint_dir is not None:
@@ -890,8 +935,12 @@ def train():
 
     data_module = make_data_module(tokenizer=tokenizer, args=args)
 
-    training_args.neftune_noise_alpha = args.neftune_noise_alpha
-    trainer = Seq2SeqTrainer(
+    trainer_class = Seq2SeqTrainer
+    if "mamba" not in args.model_name_or_path:
+        training_args.neftune_noise_alpha = 5
+    else:
+        trainer_class = MambaTrainer
+    trainer = trainer_class(
         model=model,
         tokenizer=tokenizer,
         args=training_args,
