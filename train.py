@@ -63,7 +63,7 @@ class MambaTrainer(Trainer):
 
     def save_model(self, output_dir, _internal_call):
         if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
+            os.makedirs(output_dir, exist_ok=True)
 
         torch.save(self.model.state_dict(), f"{output_dir}/pytorch_model.bin")
         self.tokenizer.save_pretrained(output_dir)
@@ -368,8 +368,8 @@ def get_accelerate_model(args, checkpoint_dir):
         **extra_tokens,
     )
     if not tokenizer.pad_token_id:
-        tokenizer.pad_token_id = tokenizer.unk_token_id
-        tokenizer.pad_token = tokenizer.unk_token
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+        tokenizer.pad_token = tokenizer.eos_token
 
     # Ensure the model has the correct token IDs (qwen!!!)
     model_args = {}
