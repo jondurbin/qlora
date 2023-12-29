@@ -24,9 +24,11 @@ import argparse
 from transformers import (
     AddedToken,
     AutoTokenizer,
+    AutoModel,
+    AutoModelForSeq2SeqLM,
     AutoModelForCausalLM,
     set_seed,
-    Seq2SeqTrainer,
+    Trainer,
     BitsAndBytesConfig,
     LlamaTokenizer,
 )
@@ -232,7 +234,7 @@ class TrainingArguments(transformers.Seq2SeqTrainingArguments):
     max_shard_size: str = field(default="5GB", metadata={"help": "Max shard size when saving model after full finetune."})
     save_quantized_base: bool = field(default=False, metadata={"help": "Optionally save the quantized base model"})
     attn_implementation: str = field(default=None, metadata={"help": "Attention implementation."})
-    neftune_noise_alpha: int = field(default=5, metadata={"help": "NEFTune noise alpha value"})
+    #neftune_noise_alpha: int = field(default=5, metadata={"help": "NEFTune noise alpha value"})
 
 @dataclass
 class GenerationArguments:
@@ -372,7 +374,7 @@ def get_accelerate_model(args, checkpoint_dir):
             bnb_4bit_use_double_quant=args.double_quant,
             bnb_4bit_quant_type=args.quant_type,
         )
-    model = AutoModelForCausalLM.from_pretrained(
+    model = AutoModelForSeq2SeqLM.from_pretrained(
         args.model_name_or_path,
         cache_dir=args.cache_dir,
         load_in_4bit=args.bits == 4,
@@ -393,8 +395,11 @@ def get_accelerate_model(args, checkpoint_dir):
         compute_dtype = torch.bfloat16
         print('Intel XPU does not support float16 yet, so switching to bfloat16')
 
-    setattr(model, 'model_parallel', True)
-    setattr(model, 'is_parallelizable', True)
+    #model.parallelize()
+    #setattr(model, 'model_parallel', True)
+    #setattr(model, 'is_parallelizable', True)
+    #rank = os.environ['LOCAL_RANK']
+    #setattr(model.decoder, 'first_device', f'cuda:{rank}')
 
     model.config.torch_dtype=(torch.float32 if args.fp16 else (torch.bfloat16 if args.bf16 else torch.float32))
 
@@ -402,14 +407,14 @@ def get_accelerate_model(args, checkpoint_dir):
     if "qwen" not in args.model_name_or_path:
         num_new_tokens = len(tokenizer) - len(model.get_input_embeddings().weight.data)
         if num_new_tokens > 0:
-            input_embeddings_data = model.get_input_embeddings().weight.data
-            output_embeddings_data = model.get_output_embeddings().weight.data
+            #input_embeddings_data = model.get_input_embeddings().weight.data
+            #output_embeddings_data = model.get_output_embeddings().weight.data
 
-            input_embeddings_avg = input_embeddings_data[:-num_new_tokens].mean(dim=0, keepdim=True)
-            output_embeddings_avg = output_embeddings_data[:-num_new_tokens].mean(dim=0, keepdim=True)
+            #input_embeddings_avg = input_embeddings_data[:-num_new_tokens].mean(dim=0, keepdim=True)
+            #output_embeddings_avg = output_embeddings_data[:-num_new_tokens].mean(dim=0, keepdim=True)
 
-            input_embeddings_data[-num_new_tokens:] = input_embeddings_avg
-            output_embeddings_data[-num_new_tokens:] = output_embeddings_avg
+            #input_embeddings_data[-num_new_tokens:] = input_embeddings_avg
+            #output_embeddings_data[-num_new_tokens:] = output_embeddings_avg
             model.resize_token_embeddings(len(tokenizer))
 
     if not args.full_finetune and args.bits in (8, 4):
@@ -901,8 +906,8 @@ def train():
 
     data_module = make_data_module(tokenizer=tokenizer, args=args)
 
-    training_args.neftune_noise_alpha = args.neftune_noise_alpha
-    trainer = Seq2SeqTrainer(
+    #training_args.neftune_noise_alpha = args.neftune_noise_alpha
+    trainer = Trainer(
         model=model,
         tokenizer=tokenizer,
         args=training_args,
