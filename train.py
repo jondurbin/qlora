@@ -563,7 +563,9 @@ def get_accelerate_model(args, checkpoint_dir):
         )
 
     if args.gradient_checkpointing and hasattr(model, "gradient_checkpointing_enable"):
-        model.gradient_checkpointing_enable()
+        model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
 
     for name, module in model.named_modules():
         if isinstance(module, LoraLayer):
