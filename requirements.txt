@@ -1,4 +1,4 @@
-transformers
+transformers @ git+https://github.com/huggingface/transformers
 bitsandbytes
 peft
 accelerate
@@ -10,4 +10,4 @@ flash_attn
 protobuf==3.20.3
 deepspeed
 wandb
-huggingface-hub==0.16.4
+huggingface-hub
