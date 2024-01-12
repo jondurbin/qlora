@@ -331,12 +331,14 @@ class TrainingArguments(transformers.Seq2SeqTrainingArguments):
             "help": "Number of layers to freeze, reduces VRAM, can produce worse results"
         },
     )
-    layer_freeze_ratio: int = field(
+    layer_freeze_ratio: float = field(
         default=0.0,
         metadata={
             "help": "Ratio of layers to freeze, reduces VRAM, can produce worse results"
         },
     )
+    nadam: bool = field(default=False, metadata={"help": "Use NAdam optimizer"})
+    radam: bool = field(default=False, metadata={"help": "Use RAdam optimizer"})
 
 
 @dataclass
@@ -1172,7 +1174,7 @@ def train():
     data_module = make_data_module(tokenizer=tokenizer, args=args)
 
     # Support RAdam and NAdam.
-    if args.optim in ("radam", "nadam"):
+    if args.radam or args.nadam:
         decay_parameters = get_parameter_names(model, [torch.nn.LayerNorm])
         decay_parameters = [name for name in decay_parameters if "bias" not in name]
         optimizer_grouped_parameters = [
@@ -1189,9 +1191,8 @@ def train():
                 "weight_decay": 0.0,
             },
         ]
-        training_args.optimizer = getattr(
-            torch.optim, args.optim.replace("radam", "RAdam").replace("nadam", "NAdam")
-        )(
+        optim = "RAdam" if args.radam else "NAdam"
+        training_args.optimizer = getattr(torch.optim, optim)(
             optimizer_grouped_parameters,
             lr=args.learning_rate,
             weight_decay=args.weight_decay,
