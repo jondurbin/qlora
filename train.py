@@ -341,40 +341,6 @@ class TrainingArguments(transformers.Seq2SeqTrainingArguments):
     radam: bool = field(default=False, metadata={"help": "Use RAdam optimizer"})
 
 
-@dataclass
-class GenerationArguments:
-    # For more hyperparameters check:
-    # https://huggingface.co/docs/transformers/main_classes/text_generation#transformers.GenerationConfig
-    # Length arguments
-    max_new_tokens: Optional[int] = field(
-        default=256,
-        metadata={
-            "help": "Maximum number of new tokens to be generated in evaluation or prediction loops"
-            "if predict_with_generate is set."
-        },
-    )
-    min_new_tokens: Optional[int] = field(
-        default=None, metadata={"help": "Minimum number of new tokens to generate."}
-    )
-
-    # Generation strategy
-    do_sample: Optional[bool] = field(default=False)
-    num_beams: Optional[int] = field(default=1)
-    num_beam_groups: Optional[int] = field(default=1)
-    penalty_alpha: Optional[float] = field(default=None)
-    use_cache: Optional[bool] = field(default=True)
-
-    # Hyperparameters for logit manipulation
-    temperature: Optional[float] = field(default=0.7)
-    top_k: Optional[int] = field(default=50)
-    top_p: Optional[float] = field(default=1.0)
-    typical_p: Optional[float] = field(default=1.0)
-    diversity_penalty: Optional[float] = field(default=0.0)
-    repetition_penalty: Optional[float] = field(default=1.0)
-    length_penalty: Optional[float] = field(default=1.0)
-    no_repeat_ngram_size: Optional[int] = field(default=0)
-
-
 def find_all_linear_names(args, model):
     cls = (
         bnb.nn.Linear4bit
@@ -538,25 +504,31 @@ def get_accelerate_model(args, checkpoint_dir):
     # Freeze embeddings layer.
     model.model.embed_tokens.weight.requires_grad_(False)
 
+    # Add the stupid chatml tokens.
+    if "qwen" not in args.model_name_or_path:
+        tokenizer.add_tokens(
+            [
+                transformers.AddedToken("<|im_start|>", special=True, normalized=False),
+                transformers.AddedToken("<|im_end|>", special=True, normalized=False),
+            ]
+        )
+
+        # Resize the tokenizer to be divisible by 64 for better performance.
+        if len(tokenizer) % 64 != 0:
+            for idx in range((len(tokenizer) // 64 + 1) * 64 - len(tokenizer)):
+                tokenizer.add_tokens(
+                    [
+                        transformers.AddedToken(
+                            f"<|special_{idx}|>", special=True, normalized=False
+                        )
+                    ]
+                )
+
     # Resize token embeddings, if necessary, to accomodate fast tokenizer with added tokens.
     if "qwen" not in args.model_name_or_path:
         num_new_tokens = len(tokenizer) - len(model.get_input_embeddings().weight.data)
         if num_new_tokens > 0:
-            input_embeddings_data = model.get_input_embeddings().weight.data
-            output_embeddings_data = model.get_output_embeddings().weight.data
-
-            input_embeddings_avg = input_embeddings_data[:-num_new_tokens].mean(
-                dim=0, keepdim=True
-            )
-            output_embeddings_avg = output_embeddings_data[:-num_new_tokens].mean(
-                dim=0, keepdim=True
-            )
-
-            input_embeddings_data[-num_new_tokens:] = input_embeddings_avg
-            output_embeddings_data[-num_new_tokens:] = output_embeddings_avg
             model.resize_token_embeddings(len(tokenizer))
-
-            # Unfreeze embeddings layer...
             model.model.embed_tokens.weight.requires_grad_(True)
 
     if not args.full_finetune and args.bits in (8, 4):
@@ -1130,18 +1102,14 @@ def get_last_checkpoint(checkpoint_dir):
 
 def train():
     hfparser = transformers.HfArgumentParser(
-        (ModelArguments, DataArguments, TrainingArguments, GenerationArguments)
+        (ModelArguments, DataArguments, TrainingArguments)
     )
     (
         model_args,
         data_args,
         training_args,
-        generation_args,
         extra_args,
     ) = hfparser.parse_args_into_dataclasses(return_remaining_strings=True)
-    training_args.generation_config = transformers.GenerationConfig(
-        **vars(generation_args)
-    )
     args = argparse.Namespace(
         **vars(model_args), **vars(data_args), **vars(training_args)
     )
