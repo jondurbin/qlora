@@ -1134,6 +1134,12 @@ def train():
             param.requires_grad = True
         for param in model.model.layers[layers_to_freeze:].parameters():
             param.requires_grad = True
+        if hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
+        else:
+            def make_inputs_require_grad(module, in_, output):
+                output.requires_grad_(True)
+            model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
 
     model.config.use_cache = False
     print("loaded model")
