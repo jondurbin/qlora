@@ -1124,7 +1124,7 @@ def train():
     # Freeze layers, if specified.
     layers_to_freeze = 0
     if args.layers_to_freeze:
-        layers_to_freeze = 0
+        layers_to_freeze = args.layers_to_freeze
     elif args.layer_freeze_ratio:
         layers_to_freeze = int(len(model.model.layers) * args.layer_freeze_ratio)
     if layers_to_freeze:
