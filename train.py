@@ -604,6 +604,21 @@ class DataCollatorForCausalLM(object):
     predict_with_generate: bool
 
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
+        if "input_ids" in instances[0]:
+            for inst in instances:
+                if len(inst["input_ids"][0]) < self.model_max_len:
+                    inst["input_ids"][0] += [self.tokenizer.pad_token_id for _ in range(self.model_max_len - len(inst["input_ids"][0]))]
+                    inst["labels"][0] += [self.tokenizer.pad_token_id for _ in range(self.model_max_len - len(inst["labels"][0]))]
+                    inst["attention_mask"] += [False for _ in range(self.model_max_len - len(inst["attention_mask"]))]
+                inst["input_ids"] = list(map(int, inst["input_ids"][0]))
+                inst["labels"] = list(map(int, inst["labels"][0]))
+                inst["attention_mask"] = list(map(int, inst["attention_mask"]))
+            return {
+                "input_ids": pad_sequence([torch.tensor(inst['input_ids']) for inst in instances], batch_first=True, padding_value=self.tokenizer.pad_token_id),
+                "labels": pad_sequence([torch.tensor(inst['labels']) for inst in instances], batch_first=True, padding_value=self.tokenizer.pad_token_id),
+                "attention_mask": pad_sequence([torch.tensor(inst['attention_mask']) for inst in instances], batch_first=True, padding_value=0),
+            }
+
         # Extract elements
         sources = [example["input"] for example in instances]
         targets = [example["output"] for example in instances]
@@ -928,7 +943,7 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
                     f"Dataset {dataset_name} not implemented yet."
                 )
 
-    def format_dataset(dataset, dataset_format):
+    def format_dataset(dataset, dataset_format, remove_unused_columns):
         if (
             dataset_format == "alpaca"
             or dataset_format == "alpaca-clean"
@@ -993,18 +1008,19 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
             # leave as is
             pass
         # Remove unused columns.
-        dataset = dataset.remove_columns(
-            [
+        if remove_unused_columns:
+            dataset = dataset.remove_columns(
+                [
                 col
-                for col in dataset.column_names["train"]
-                if col not in ["input", "output"]
-            ]
-        )
+                    for col in dataset.column_names["train"]
+                    if col not in ["input", "output"]
+                ]
+            )
         return dataset
 
     # Load dataset.
     dataset = load_data(args.dataset)
-    dataset = format_dataset(dataset, args.dataset_format)
+    dataset = format_dataset(dataset, args.dataset_format, args.remove_unused_columns)
 
     # Split train/eval, reduce size
     if args.do_eval or args.do_predict:
