@@ -653,21 +653,21 @@ class DataCollatorForCausalLM(object):
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
         if "input_ids" in instances[0]:
             for inst in instances:
-                if len(inst["input_ids"][0]) < self.model_max_len:
-                    inst["input_ids"][0] += [
+                if len(inst["input_ids"]) < self.model_max_len:
+                    inst["input_ids"] += [
                         self.tokenizer.pad_token_id
-                        for _ in range(self.model_max_len - len(inst["input_ids"][0]))
+                        for _ in range(self.model_max_len - len(inst["input_ids"]))
                     ]
-                    inst["labels"][0] += [
+                    inst["labels"] += [
                         self.tokenizer.pad_token_id
-                        for _ in range(self.model_max_len - len(inst["labels"][0]))
+                        for _ in range(self.model_max_len - len(inst["labels"]))
                     ]
                     inst["attention_mask"] += [
                         False
                         for _ in range(self.model_max_len - len(inst["attention_mask"]))
                     ]
-                inst["input_ids"] = list(map(int, inst["input_ids"][0]))
-                inst["labels"] = list(map(int, inst["labels"][0]))
+                inst["input_ids"] = list(map(int, inst["input_ids"]))
+                inst["labels"] = list(map(int, inst["labels"]))
                 inst["attention_mask"] = list(map(int, inst["attention_mask"]))
             return {
                 "input_ids": pad_sequence(
