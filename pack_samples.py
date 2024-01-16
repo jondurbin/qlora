@@ -3,7 +3,6 @@ import gc
 import glob
 import random
 import multiprocessing
-from copy import deepcopy
 
 import datasets
 from loguru import logger
@@ -138,9 +137,9 @@ def main():
         ]
     )
     tokenized_data.to_parquet(f"{args.prefix}-combined.parquet")
+    tokenized_data = datasets.Dataset.from_parquet(f"{args.prefix}-combined.parquet")
 
     # We'll use k-bucket first-fit algo to somewhat efficiently pack samples.
-    packed = []
     temp_batches = [
         {"input_ids": [], "labels": [], "attention_mask": [], "length": 0, "index": 0}
         for _ in range(16)
@@ -157,10 +156,22 @@ def main():
             tokenizer.pad_token_id = tokenizer.eos_token_id
 
     # Start packing...
+    packed = datasets.Dataset.from_list(
+        [
+            {
+                "input_ids": [0, 1, 2],
+                "labels": [0, 1, 2],
+                "attention_mask": [0, 1, 2],
+                "length": 12,
+                "index": 12,
+            }
+        ]
+    ).filter(lambda _: False)
+
     for result in tqdm(tokenized_data):
         total_length += result["length"]
         if result["length"] >= args.max_length:
-            packed.append(result)
+            packed = packed.add_item(result)
             continue
         fit_batch = 0
         largest_batch = -1
@@ -186,9 +197,9 @@ def main():
             continue
         if largest_batch == -1:
             logger.warning(f"Had to pack early: {result['length']}")
-            packed.append(result)
+            packed = packed.add_item(result)
             continue
-        packed.append(deepcopy(temp_batches[largest_batch_idx]))
+        packed = packed.add_item(temp_batches[largest_batch_idx])
         temp_batches[largest_batch_idx] = {
             "input_ids": result["input_ids"],
             "labels": result["labels"],
@@ -199,16 +210,14 @@ def main():
     for batch in temp_batches:
         logger.info("Finishing batch...")
         if batch["length"]:
-            packed.append(batch)
+            packed = packed.add_item(batch)
 
     # Done!
     total_packed_length = sum([item["length"] for item in packed])
     logger.info(f"Total length: {total_length}")
     logger.info(f"Packd length: {total_packed_length}")
     logger.info(f"Packed item count: {len(packed)}")
-    datasets.Dataset.from_list(packed).to_parquet(
-        "packed-bagel-input-output-v0.4.parquet"
-    )
+    packed.to_parquet(f"{args.prefix}-packed.parquet")
 
 
 if __name__ == "__main__":
