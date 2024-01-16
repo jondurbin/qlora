@@ -46,7 +46,7 @@ def tokenize(item):
     labels = [IGNORE_INDEX for _ in range(len(input_ids))] + response_ids
     return {
         "input_ids": inputs,
-        "attention_mask": [_id != IGNORE_INDEX for _id in labels],
+        "attention_mask": [1 if _id != IGNORE_INDEX else 0 for _id in labels],
         "labels": labels,
         "length": len(inputs),
     }
@@ -138,12 +138,11 @@ def main():
         ]
     )
     tokenized_data.to_parquet(f"{args.prefix}-combined.parquet")
-    tokenized_data = datasets.Dataset.from_parquet(f"{args.prefix}-combined.parquet")
 
     # We'll use k-bucket first-fit algo to somewhat efficiently pack samples.
     packed = []
     temp_batches = [
-        {"input_ids": [], "labels": [], "attention_mask": [], "length": 0}
+        {"input_ids": [], "labels": [], "attention_mask": [], "length": 0, "index": 0}
         for _ in range(16)
     ]
     total_length = 0
@@ -176,8 +175,11 @@ def main():
             if batch["length"] + result["length"] <= args.max_length:
                 batch["input_ids"] += result["input_ids"]
                 batch["labels"] += result["labels"]
-                batch["attention_mask"] += result["attention_mask"]
+                batch["attention_mask"] += [
+                    val * (batch["index"] + 1) for val in result["attention_mask"]
+                ]
                 batch["length"] += result["length"]
+                batch["index"] += 1
                 fit_batch = True
                 break
         if fit_batch:
@@ -192,6 +194,7 @@ def main():
             "labels": result["labels"],
             "attention_mask": result["attention_mask"],
             "length": result["length"],
+            "index": 0,
         }
     for batch in temp_batches:
         logger.info("Finishing batch...")
