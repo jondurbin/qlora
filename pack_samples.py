@@ -1,13 +1,14 @@
 import argparse
 import gc
 import glob
-import random
 import multiprocessing
+import random
+import re
 
 import datasets
 from loguru import logger
 from tqdm import tqdm
-from transformers import AutoTokenizer, AddedToken
+from transformers import AddedToken, AutoTokenizer
 
 IGNORE_INDEX = -100
 MAX_LENGTH = 4094
@@ -103,6 +104,12 @@ def main():
     parser.add_argument(
         "--batch-size", type=int, default=100000, help="Batch size, to reduce peak RAM"
     )
+    parser.add_argument(
+        "--pack-batch-size",
+        type=int,
+        default=10000,
+        help="Batch size for packing (intermediate arrow table size)",
+    )
     args = parser.parse_args()
 
     # First, we'll tokenize the dataset.
@@ -134,10 +141,10 @@ def main():
         [
             datasets.Dataset.from_parquet(path)
             for path in glob.glob(f"{args.prefix}-*.parquet")
+            if re.match(f"{re.escape(args.prefix)}-[0-9]+\\.parquet", str(path))
         ]
     )
     tokenized_data.to_parquet(f"{args.prefix}-combined.parquet")
-    tokenized_data = datasets.Dataset.from_parquet(f"{args.prefix}-combined.parquet")
 
     # We'll use k-bucket first-fit algo to somewhat efficiently pack samples.
     temp_batches = [
@@ -167,11 +174,16 @@ def main():
             }
         ]
     ).filter(lambda _: False)
-
+    packed_batch = []
     for result in tqdm(tokenized_data):
+        if len(packed_batch) >= args.pack_batch_size:
+            packed = datasets.concatenate_datasets(
+                [packed, datasets.Dataset.from_list(packed_batch)]
+            )
+            packed_batch = []
         total_length += result["length"]
         if result["length"] >= args.max_length:
-            packed = packed.add_item(result)
+            packed_batch.append(result)
             continue
         fit_batch = 0
         largest_batch = -1
@@ -197,9 +209,9 @@ def main():
             continue
         if largest_batch == -1:
             logger.warning(f"Had to pack early: {result['length']}")
-            packed = packed.add_item(result)
+            packed_batch.append(result)
             continue
-        packed = packed.add_item(temp_batches[largest_batch_idx])
+        packed_batch.append(temp_batches[largest_batch_idx])
         temp_batches[largest_batch_idx] = {
             "input_ids": result["input_ids"],
             "labels": result["labels"],
@@ -207,15 +219,17 @@ def main():
             "length": result["length"],
             "index": 0,
         }
+    if packed_batch:
+        packed = datasets.concatenate_datasets(
+            [packed, datasets.Dataset.from_list(packed_batch)]
+        )
     for batch in temp_batches:
         logger.info("Finishing batch...")
         if batch["length"]:
             packed = packed.add_item(batch)
 
     # Done!
-    total_packed_length = sum([item["length"] for item in packed])
-    logger.info(f"Total length: {total_length}")
-    logger.info(f"Packd length: {total_packed_length}")
+    logger.info(f"Total token count: {total_length}")
     logger.info(f"Packed item count: {len(packed)}")
     packed.to_parquet(f"{args.prefix}-packed.parquet")
 
