@@ -18,6 +18,7 @@ import pandas as pd
 import importlib
 from packaging import version
 import torch
+import torch.nn.functional as F
 import transformers
 from torch.nn.utils.rnn import pad_sequence
 import argparse
@@ -121,7 +122,7 @@ class DataArguments:
     model_max_len: int = field(
         default=4096,
         metadata={
-            "help": "Maximum model length (input and output).  Sequences will be right padded (and possibly truncated)."
+            "help": "Maximum model length (input and output).  Sequences will be padded (and possibly truncated)."
         },
     )
     skip_excess_length: bool = field(
@@ -293,6 +294,10 @@ class TrainingArguments(transformers.Seq2SeqTrainingArguments):
             "help": "Group sequences into batches with same length. Saves memory and speeds up training considerably."
         },
     )
+    packed_samples: bool = field(
+        default=False,
+        metadata={"help": "Flag indicating if the dataset uses sample packing."},
+    )
     save_strategy: str = field(
         default="steps", metadata={"help": "When to save checkpoints"}
     )
@@ -339,6 +344,48 @@ class TrainingArguments(transformers.Seq2SeqTrainingArguments):
     )
     nadam: bool = field(default=False, metadata={"help": "Use NAdam optimizer"})
     radam: bool = field(default=False, metadata={"help": "Use RAdam optimizer"})
+
+
+### Copied from github.com/MeetKai/functionary
+def get_max_seqlen_in_batch(attention_mask):
+    max_num = torch.max(attention_mask)
+    # attention_mask: B x N
+    counts = []
+    for i in range(1, max_num + 1):
+        counts.append(
+            torch.sum(attention_mask == i, axis=-1)
+        )  # shape: B, count length of data point maksed with i
+    result = torch.stack(counts, axis=1)
+    result = result.flatten()
+    return result[result.nonzero()].squeeze(-1).to(dtype=torch.int32)
+
+
+def get_unpad_data(attention_mask):
+    seqlens_in_batch = get_max_seqlen_in_batch(
+        attention_mask
+    )  # attention_mask.sum(dim=-1, dtype=torch.int32)
+    indices = torch.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
+    max_seqlen_in_batch = seqlens_in_batch.max().item()
+    cu_seqlens = F.pad(
+        torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.torch.int32), (1, 0)
+    )
+    return (
+        indices,
+        cu_seqlens,
+        max_seqlen_in_batch,
+    )
+
+
+def monkey_patch_packing_llama():
+    transformers.models.llama.modeling_llama._get_unpad_data = get_unpad_data
+
+
+def monkey_patch_packing_mistral():
+    transformers.models.mistral.modeling_mistral._get_unpad_data = get_unpad_data
+
+
+def monkey_patch_packing_mixtral():
+    transformers.models.mixtral.modeling_mixtral._get_unpad_data = get_unpad_data
 
 
 def find_all_linear_names(args, model):
@@ -607,16 +654,37 @@ class DataCollatorForCausalLM(object):
         if "input_ids" in instances[0]:
             for inst in instances:
                 if len(inst["input_ids"][0]) < self.model_max_len:
-                    inst["input_ids"][0] += [self.tokenizer.pad_token_id for _ in range(self.model_max_len - len(inst["input_ids"][0]))]
-                    inst["labels"][0] += [self.tokenizer.pad_token_id for _ in range(self.model_max_len - len(inst["labels"][0]))]
-                    inst["attention_mask"] += [False for _ in range(self.model_max_len - len(inst["attention_mask"]))]
+                    inst["input_ids"][0] += [
+                        self.tokenizer.pad_token_id
+                        for _ in range(self.model_max_len - len(inst["input_ids"][0]))
+                    ]
+                    inst["labels"][0] += [
+                        self.tokenizer.pad_token_id
+                        for _ in range(self.model_max_len - len(inst["labels"][0]))
+                    ]
+                    inst["attention_mask"] += [
+                        False
+                        for _ in range(self.model_max_len - len(inst["attention_mask"]))
+                    ]
                 inst["input_ids"] = list(map(int, inst["input_ids"][0]))
                 inst["labels"] = list(map(int, inst["labels"][0]))
                 inst["attention_mask"] = list(map(int, inst["attention_mask"]))
             return {
-                "input_ids": pad_sequence([torch.tensor(inst['input_ids']) for inst in instances], batch_first=True, padding_value=self.tokenizer.pad_token_id),
-                "labels": pad_sequence([torch.tensor(inst['labels']) for inst in instances], batch_first=True, padding_value=self.tokenizer.pad_token_id),
-                "attention_mask": pad_sequence([torch.tensor(inst['attention_mask']) for inst in instances], batch_first=True, padding_value=0),
+                "input_ids": pad_sequence(
+                    [torch.tensor(inst["input_ids"]) for inst in instances],
+                    batch_first=True,
+                    padding_value=self.tokenizer.pad_token_id,
+                ),
+                "labels": pad_sequence(
+                    [torch.tensor(inst["labels"]) for inst in instances],
+                    batch_first=True,
+                    padding_value=self.tokenizer.pad_token_id,
+                ),
+                "attention_mask": pad_sequence(
+                    [torch.tensor(inst["attention_mask"]) for inst in instances],
+                    batch_first=True,
+                    padding_value=0,
+                ),
             }
 
         # Extract elements
@@ -1011,7 +1079,7 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
         if remove_unused_columns:
             dataset = dataset.remove_columns(
                 [
-                col
+                    col
                     for col in dataset.column_names["train"]
                     if col not in ["input", "output"]
                 ]
@@ -1153,9 +1221,24 @@ def train():
         if hasattr(model, "enable_input_require_grads"):
             model.enable_input_require_grads()
         else:
+
             def make_inputs_require_grad(module, in_, output):
                 output.requires_grad_(True)
+
             model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
+
+    # Monkey-patches for sample packing.
+    if args.packed_samples:
+        model_config = transformers.AutoConfig.from_pretrained(args.model_name_or_path)
+        config_type = type(model_config).__name__.lower()
+        if "mistral" in config_type:
+            monkey_patch_packing_mistral()
+        elif "llama" in config_type:
+            monkey_patch_packing_llama()
+        elif "mixtral" in config_type:
+            monkey_patch_packing.monkey_patch_packing_mixtral()
+        else:
+            raise Exception(f"Unsupported model type for packed samples: {config_type}")
 
     model.config.use_cache = False
     print("loaded model")
