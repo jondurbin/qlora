@@ -529,6 +529,10 @@ def get_accelerate_model(args, checkpoint_dir):
         num_new_tokens = len(tokenizer) - len(model.get_input_embeddings().weight.data)
         if num_new_tokens > 0:
             model.resize_token_embeddings(len(tokenizer))
+            input_embeddings_data = model.get_input_embeddings().weight.data
+            output_embeddings_data = model.get_output_embeddings().weight.data
+            input_embeddings_data[-num_new_tokens:] = 0.0
+            output_embeddings_data[-num_new_tokens:] = 0.0
             model.model.embed_tokens.weight.requires_grad_(True)
 
     if not args.full_finetune and args.bits in (8, 4):
