@@ -414,6 +414,15 @@ def get_accelerate_model(args, checkpoint_dir):
         n_gpus = torch.cuda.device_count()
     if is_ipex_available() and torch.xpu.is_available():
         n_gpus = torch.xpu.device_count()
+    max_memory = f"{args.max_memory_MB}MB"
+    max_memory = {i: max_memory for i in range(n_gpus)}
+    device_map = "auto"
+
+    # if we are in a distributed setting, we need to set the device map and max memory per device
+    if os.environ.get("LOCAL_RANK") is not None:
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        device_map = {"": local_rank}
+        max_memory = {"": max_memory[local_rank]}
 
     if args.full_finetune:
         assert args.bits in [16, 32]
@@ -478,6 +487,8 @@ def get_accelerate_model(args, checkpoint_dir):
         ),
         trust_remote_code=args.trust_remote_code,
         attn_implementation=args.attn_implementation,
+        device_map=None if args.deepspeed else device_map,
+        max_memory=None if args.deepspeed else max_memory,
         **extra_model_args,
     )
     if compute_dtype == torch.float16 and args.bits == 4:
@@ -563,7 +574,7 @@ def get_accelerate_model(args, checkpoint_dir):
                 model, join(checkpoint_dir, "adapter_model"), is_trainable=True
             )
         else:
-            print(f"adding LoRA modules...")
+            print("adding LoRA modules...")
             modules = find_all_linear_names(args, model)
             config = LoraConfig(
                 r=args.lora_r,
@@ -845,7 +856,7 @@ def local_dataset(dataset_name, test_size=0.02, include_sources=None):
         raise ValueError(f"Unsupported dataset format: {dataset_name}")
     if include_sources and include_sources != ["ALL"]:
         print(f"Filtering for sources: {include_sources}")
-        full_dataset = full_datasets.filter(lambda x: x["source"] in include_sources)
+        full_dataset = full_dataset.filter(lambda x: x["source"] in include_sources)
     if "category" in full_dataset.column_names:
         full_dataset = full_dataset.class_encode_column("category")
         return full_dataset.train_test_split(
@@ -854,7 +865,7 @@ def local_dataset(dataset_name, test_size=0.02, include_sources=None):
     elif "source" in full_dataset.column_names:
         try:
             full_dataset = full_dataset.class_encode_column("source")
-        except:
+        except Exception:
             ...
         return full_dataset.train_test_split(
             test_size=test_size, stratify_by_column="source"
@@ -925,7 +936,7 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
                         )
                     )
                     return full_dataset
-                except:
+                except Exception:
                     raise ValueError(f"Error loading dataset from {dataset_name}")
             else:
                 raise NotImplementedError(
@@ -1141,8 +1152,10 @@ def train():
         if hasattr(model, "enable_input_require_grads"):
             model.enable_input_require_grads()
         else:
+
             def make_inputs_require_grad(module, in_, output):
                 output.requires_grad_(True)
+
             model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
 
     model.config.use_cache = False
