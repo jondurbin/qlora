@@ -515,37 +515,6 @@ def get_accelerate_model(args, checkpoint_dir):
     # Freeze embeddings layer.
     model.model.embed_tokens.weight.requires_grad_(False)
 
-    # Add the stupid chatml tokens.
-    if "qwen" not in args.model_name_or_path:
-        tokenizer.add_tokens(
-            [
-                transformers.AddedToken("<|im_start|>", special=True, normalized=False),
-                transformers.AddedToken("<|im_end|>", special=True, normalized=False),
-            ]
-        )
-
-        # Resize the tokenizer to be divisible by 64 for better performance.
-        if len(tokenizer) % 64 != 0:
-            for idx in range((len(tokenizer) // 64 + 1) * 64 - len(tokenizer)):
-                tokenizer.add_tokens(
-                    [
-                        transformers.AddedToken(
-                            f"<|special_{idx}|>", special=True, normalized=False
-                        )
-                    ]
-                )
-
-    # Resize token embeddings, if necessary, to accomodate fast tokenizer with added tokens.
-    if "qwen" not in args.model_name_or_path:
-        num_new_tokens = len(tokenizer) - len(model.get_input_embeddings().weight.data)
-        if num_new_tokens > 0:
-            model.resize_token_embeddings(len(tokenizer))
-            input_embeddings_data = model.get_input_embeddings().weight.data
-            output_embeddings_data = model.get_output_embeddings().weight.data
-            input_embeddings_data[-num_new_tokens:] = 0.0
-            output_embeddings_data[-num_new_tokens:] = 0.0
-            model.model.embed_tokens.weight.requires_grad_(True)
-
     if not args.full_finetune and args.bits in (8, 4):
         model = prepare_model_for_kbit_training(
             model, use_gradient_checkpointing=args.gradient_checkpointing
